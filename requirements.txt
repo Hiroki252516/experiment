@@ -1,0 +1,9 @@
+numpy
+pettingzoo
+gymnasium
+pandas
+matplotlib
+pydantic
+requests
+rich
+pytest

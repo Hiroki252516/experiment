@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.DS_Store
+*.pyc
+*.pyo
+*.pyd
+
+logs/*.csv
+logs/*.jsonl
+logs/*.png
+!logs/.gitkeep
