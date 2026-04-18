@@ -84,11 +84,56 @@ python scripts/run_experiment.py --episodes 10 --conditions comm silent random -
 python scripts/analyze_results.py --input logs/results.csv --figure logs/summary.png
 ```
 
+## Realtime Viewer
+
+Streamlit ベースの realtime viewer を追加しています。目的は、2 体の LLM がどの glyph を送り、どの行動を選び、gridworld がどう進んだかを live と replay の両方で観察することです。
+
+依存:
+
+- `streamlit`
+
+起動:
+
+```bash
+make viewer
+```
+
+または:
+
+```bash
+streamlit run viewer/app.py
+```
+
+viewer には次の 3 モードがあります。
+
+- `live`: 実行中 run の trace を 1 秒ごとに監視
+- `replay`: 保存済み trace を episode / step 単位で再生
+- `launch`: GUI から experiment runner を起動
+
+GUI から起動した run は `logs/traces/<run_id>.jsonl` と `logs/runs/<run_id>/manifest.json` を出力し、viewer はそれを監視します。
+
+別ターミナルで手動実行する場合:
+
+```bash
+make run MODEL=gemma3:1b
+make viewer
+```
+
+Replay の使い方:
+
+1. viewer を起動する
+2. `Run` を選ぶ
+3. `Mode` を `replay` に切り替える
+4. `Condition`, `Episode`, `Step` を選ぶ
+5. `Play/Pause`, `Prev`, `Next` で確認する
+
 ## 結果の見方
 
 - `logs/results.csv`: episode 単位の要約
 - `logs/episodes.jsonl`: final raw output を含む詳細ログ
 - `logs/summary.png`: 条件別平均報酬、成功率、target agreement rate の図
+- `logs/traces/<run_id>.jsonl`: realtime viewer 用 step trace
+- `logs/runs/<run_id>/manifest.json`: run metadata
 
 `results.csv` には最低限次を保存します。
 
@@ -116,6 +161,15 @@ python scripts/analyze_results.py --input logs/results.csv --figure logs/summary
 
 - `make test` は通るが `make smoke` が失敗する  
   unit test は Ollama なしでも通るようにしてありますが、実験 run は Ollama が必要です。
+
+- viewer は起動するが live trace が無い  
+  まだ run が始まっていないか、`logs/traces/` に対象 run の trace がありません。Launch View から起動するか、別ターミナルで runner を実行してください。
+
+- viewer の Launch View で失敗する  
+  Ollama が未導入またはモデル未取得の可能性があります。runner 側の manifest に失敗理由が出ます。
+
+- replay に何も出ない  
+  対象 run の trace が空、または選択した condition / episode に該当フレームがありません。
 
 - `comm` が `silent` を上回らない  
   小型モデルでは自然に有意味な glyph 協調が出ない場合があります。まずはログを見て、モデルサイズや prompt の見直しを検討してください。

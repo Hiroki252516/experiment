@@ -3,7 +3,7 @@ PIP ?= .venv/bin/pip
 MODEL ?= gemma3:1b
 BASE_URL ?= http://localhost:11434
 
-.PHONY: setup test smoke run analyze
+.PHONY: setup test smoke run analyze viewer
 
 setup:
 	python3 -m venv .venv
@@ -21,3 +21,6 @@ run:
 
 analyze:
 	$(PYTHON) scripts/analyze_results.py --input logs/results.csv --figure logs/summary.png
+
+viewer:
+	$(PYTHON) -m streamlit run viewer/app.py

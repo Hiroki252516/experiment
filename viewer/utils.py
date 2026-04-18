@@ -1,0 +1,80 @@
+"""Miscellaneous helpers for the Streamlit viewer."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+
+def generate_run_id() -> str:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"run_{timestamp}_{uuid.uuid4().hex[:8]}"
+
+
+def format_timestamp(value: str) -> str:
+    if not value:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_event_line(row: dict[str, Any]) -> str:
+    return (
+        f"step {row.get('step')}: "
+        f"A move={row.get('move_a')}, target={row.get('target_a')} | "
+        f"B move={row.get('move_b')}, target={row.get('target_b')} | "
+        f"reward={row.get('team_reward')} | outcome={row.get('outcome')}"
+    )
+
+
+def resolve_python_executable(project_root: Path) -> str:
+    candidate = project_root / ".venv" / "bin" / "python"
+    if candidate.exists():
+        return str(candidate)
+    return sys.executable
+
+
+def start_experiment_process(
+    *,
+    project_root: Path,
+    model: str,
+    episodes: int,
+    conditions: list[str],
+    base_url: str,
+    seed: int,
+    run_id: str,
+) -> subprocess.Popen[Any]:
+    command = [
+        resolve_python_executable(project_root),
+        str(project_root / "scripts" / "run_experiment.py"),
+        "--episodes",
+        str(episodes),
+        "--conditions",
+        *conditions,
+        "--model",
+        model,
+        "--base-url",
+        base_url,
+        "--seed",
+        str(seed),
+        "--run-id",
+        run_id,
+    ]
+    return subprocess.Popen(
+        command,
+        cwd=project_root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+
+
+def process_running(process: Any) -> bool:
+    return process is not None and process.poll() is None

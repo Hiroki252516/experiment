@@ -7,3 +7,4 @@ pydantic
 requests
 rich
 pytest
+streamlit

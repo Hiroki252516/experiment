@@ -9,4 +9,6 @@ __pycache__/
 logs/*.csv
 logs/*.jsonl
 logs/*.png
+logs/traces/
+logs/runs/
 !logs/.gitkeep

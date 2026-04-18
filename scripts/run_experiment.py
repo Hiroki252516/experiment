@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -22,9 +25,11 @@ from agents.ollama_agent import (  # noqa: E402
     OllamaAgent,
     check_ollama_setup,
 )
-from envs.scoreg_env import GLYPH_SIDE, MOVE_TO_INDEX, ScoreGParallelEnv  # noqa: E402
+from envs.scoreg_env import GLYPH_SIDE, MOVE_TO_INDEX, ScoreGParallelEnv, glyph_matrix_to_rows  # noqa: E402
 
 CONDITIONS = ("comm", "silent", "random")
+AGENT_NAMES = ("agent_a", "agent_b")
+ZERO_GLYPH_ROWS = ["0" * GLYPH_SIDE for _ in range(GLYPH_SIDE)]
 
 
 @dataclass
@@ -42,6 +47,31 @@ class EpisodeRecord:
     error_message: str = ""
 
 
+def utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def default_run_id() -> str:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"run_{timestamp}_{uuid.uuid4().hex[:8]}"
+
+
+def glyph_rows_from_matrix(glyph: np.ndarray) -> list[str]:
+    return glyph_matrix_to_rows(glyph)
+
+
+def zero_trace_row() -> list[str]:
+    return list(ZERO_GLYPH_ROWS)
+
+
+def observation_step(observations: dict[str, dict[str, np.ndarray]]) -> int:
+    return int(observations["agent_a"]["step_count"][0])
+
+
+def int_list(value: np.ndarray) -> list[int]:
+    return [int(item) for item in value.tolist()]
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run ScoreG local LLM coordination experiments.")
     parser.add_argument("--episodes", type=int, default=5, help="Episodes per condition.")
@@ -53,6 +83,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument("--output-csv", default="logs/results.csv")
     parser.add_argument("--output-jsonl", default="logs/episodes.jsonl")
+    parser.add_argument("--run-id", default="", help="Optional explicit run id for viewer integration.")
+    parser.add_argument("--trace-dir", default="logs/traces", help="Directory for step-level trace JSONL.")
+    parser.add_argument("--runs-dir", default="logs/runs", help="Directory for per-run manifests.")
     return parser.parse_args(argv)
 
 
@@ -65,45 +98,218 @@ def override_glyph(condition: str, glyph: np.ndarray, rng: np.random.Generator) 
 
 
 def build_agent_summary(agent_name: str, target: str, outcome: str, agreed: bool) -> str:
-    return f"episode outcome={outcome}; self_target={target}; agreement={agreed}"
+    return f"episode outcome={outcome}; agent={agent_name}; self_target={target}; agreement={agreed}"
+
+
+def ensure_ollama_ready(model: str, base_url: str) -> None:
+    status = check_ollama_setup(model=model, base_url=base_url)
+    if not status.ok:
+        raise SystemExit(status.guidance(model))
+
+
+def resolve_run_paths(args: argparse.Namespace) -> dict[str, Path]:
+    run_id = args.run_id or default_run_id()
+    trace_dir = Path(args.trace_dir)
+    runs_dir = Path(args.runs_dir)
+    run_dir = runs_dir / run_id
+    return {
+        "run_id": Path(run_id),
+        "trace_dir": trace_dir,
+        "runs_dir": runs_dir,
+        "run_dir": run_dir,
+        "trace_path": trace_dir / f"{run_id}.jsonl",
+        "manifest_path": run_dir / "manifest.json",
+        "results_csv_path": Path(args.output_csv),
+        "episodes_jsonl_path": Path(args.output_jsonl),
+    }
+
+
+def build_manifest(args: argparse.Namespace, paths: dict[str, Path]) -> dict[str, Any]:
+    return {
+        "run_id": paths["run_id"].name,
+        "model": args.model,
+        "conditions": list(args.conditions),
+        "episodes_per_condition": args.episodes,
+        "base_seed": args.seed,
+        "grid_size": args.grid_size,
+        "max_steps": args.max_steps,
+        "status": "starting",
+        "started_at": utc_now_iso(),
+        "completed_at": "",
+        "trace_path": str(paths["trace_path"].resolve()),
+        "results_csv_path": str(paths["results_csv_path"].resolve()),
+        "episodes_jsonl_path": str(paths["episodes_jsonl_path"].resolve()),
+        "current_condition": "",
+        "current_episode": -1,
+        "last_step": -1,
+        "last_error_message": "",
+    }
+
+
+def write_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+
+
+def append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        handle.flush()
+
+
+def build_trace_row(
+    *,
+    run_id: str,
+    condition: str,
+    episode_id: int,
+    step: int,
+    env: ScoreGParallelEnv,
+    sent_rows: dict[str, list[str]],
+    received_rows: dict[str, list[str]],
+    moves: dict[str, str],
+    targets: dict[str, str],
+    raw_outputs: dict[str, str],
+    rewards: dict[str, float],
+    cumulative_team_reward: float,
+    done: bool,
+    outcome: str,
+    error_message: str,
+) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "timestamp": utc_now_iso(),
+        "condition": condition,
+        "episode": episode_id,
+        "step": step,
+        "agent_a_pos": int_list(env.agent_positions["agent_a"]),
+        "agent_b_pos": int_list(env.agent_positions["agent_b"]),
+        "left_item_pos": int_list(env.item_positions["LEFT"]),
+        "right_item_pos": int_list(env.item_positions["RIGHT"]),
+        "value_left": env.left_value,
+        "value_right": env.right_value,
+        "best_item": env.best_item,
+        "glyph_a_sent": sent_rows["agent_a"],
+        "glyph_b_sent": sent_rows["agent_b"],
+        "glyph_a_received": received_rows["agent_a"],
+        "glyph_b_received": received_rows["agent_b"],
+        "move_a": moves["agent_a"],
+        "move_b": moves["agent_b"],
+        "target_a": targets["agent_a"],
+        "target_b": targets["agent_b"],
+        "raw_a": raw_outputs["agent_a"],
+        "raw_b": raw_outputs["agent_b"],
+        "reward_a": round(rewards["agent_a"], 4),
+        "reward_b": round(rewards["agent_b"], 4),
+        "team_reward": round(rewards["agent_a"], 4),
+        "cumulative_team_reward": round(cumulative_team_reward, 4),
+        "done": done,
+        "outcome": outcome,
+        "error_message": error_message,
+    }
+
+
+def write_outputs(records: list[EpisodeRecord], details: list[dict[str, object]], csv_path: Path, jsonl_path: Path) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    dataframe = pd.DataFrame([asdict(record) for record in records])
+    dataframe.to_csv(csv_path, index=False)
+
+    with jsonl_path.open("w", encoding="utf-8") as handle:
+        for row in details:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def run_episode(
+    *,
     env: ScoreGParallelEnv,
     agents: dict[str, OllamaAgent],
     condition: str,
     episode_id: int,
     seed: int,
     rng: np.random.Generator,
+    run_id: str,
+    trace_path: Path,
+    manifest: dict[str, Any],
+    manifest_path: Path,
 ) -> tuple[EpisodeRecord, dict[str, object]]:
     observations, _ = env.reset(seed=seed)
-    team_reward = 0.0
-    last_targets = {"agent_a": "UNKNOWN", "agent_b": "UNKNOWN"}
-    last_raw_outputs = {"agent_a": "", "agent_b": ""}
+    cumulative_team_reward = 0.0
+    last_targets = {agent: "UNKNOWN" for agent in AGENT_NAMES}
+    last_raw_outputs = {agent: "" for agent in AGENT_NAMES}
     error_message = ""
     outcome = "max_steps"
 
+    manifest["current_condition"] = condition
+    manifest["current_episode"] = episode_id
+    manifest["last_step"] = 0
+    write_manifest(manifest_path, manifest)
+
     while env.agents:
-        actions: dict[str, dict[str, object]] = {}
+        step = observation_step(observations)
+        sent_rows = {agent: zero_trace_row() for agent in AGENT_NAMES}
+        received_rows = {
+            "agent_a": glyph_rows_from_matrix(observations["agent_a"]["other_last_glyph"]),
+            "agent_b": glyph_rows_from_matrix(observations["agent_b"]["other_last_glyph"]),
+        }
+        moves = {agent: "" for agent in AGENT_NAMES}
+        targets = {agent: last_targets[agent] for agent in AGENT_NAMES}
+        raw_outputs = {agent: "" for agent in AGENT_NAMES}
+        rewards = {agent: 0.0 for agent in AGENT_NAMES}
+        done = False
+
         try:
+            actions: dict[str, dict[str, object]] = {}
             for agent_name in env.agents:
                 turn = agents[agent_name].act(observations[agent_name])
-                glyph = override_glyph(condition, turn.decision.glyph_matrix(), rng)
+                glyph_matrix = override_glyph(condition, turn.decision.glyph_matrix(), rng)
+                glyph_rows = glyph_rows_from_matrix(glyph_matrix)
                 actions[agent_name] = {
                     "move": MOVE_TO_INDEX[turn.decision.move],
-                    "glyph": glyph,
+                    "glyph": glyph_matrix,
                 }
+                sent_rows[agent_name] = glyph_rows
+                moves[agent_name] = turn.decision.move
+                targets[agent_name] = turn.decision.target
+                raw_outputs[agent_name] = turn.raw_response_text
                 last_targets[agent_name] = turn.decision.target
                 last_raw_outputs[agent_name] = turn.raw_response_text
+
+            observations, rewards, terminations, truncations, _ = env.step(actions)
+            cumulative_team_reward += rewards["agent_a"]
+            done = not env.agents or all(terminations.values()) or all(truncations.values())
+            outcome = env.last_outcome if done else "not_finished"
         except AgentExecutionError as exc:
             outcome = "agent_error"
             error_message = str(exc)
-            break
+            done = True
+            manifest["last_error_message"] = error_message
 
-        observations, rewards, terminations, truncations, _ = env.step(actions)
-        team_reward += rewards.get("agent_a", 0.0)
-        if not env.agents or all(terminations.values()) or all(truncations.values()):
-            outcome = env.last_outcome
+        trace_row = build_trace_row(
+            run_id=run_id,
+            condition=condition,
+            episode_id=episode_id,
+            step=step,
+            env=env,
+            sent_rows=sent_rows,
+            received_rows=received_rows,
+            moves=moves,
+            targets=targets,
+            raw_outputs=raw_outputs,
+            rewards=rewards,
+            cumulative_team_reward=cumulative_team_reward,
+            done=done,
+            outcome=outcome,
+            error_message=error_message,
+        )
+        append_jsonl(trace_path, trace_row)
+        manifest["last_step"] = step
+        write_manifest(manifest_path, manifest)
+
+        if done:
             break
 
     agreed = last_targets["agent_a"] == last_targets["agent_b"] and last_targets["agent_a"] in {"LEFT", "RIGHT"}
@@ -122,17 +328,18 @@ def run_episode(
         value_right=env.right_value,
         best_item=env.best_item,
         outcome=outcome,
-        team_reward=round(team_reward, 4),
+        team_reward=round(cumulative_team_reward, 4),
         target_a=last_targets["agent_a"],
         target_b=last_targets["agent_b"],
         error_message=error_message,
     )
     details = {
+        "run_id": run_id,
         "seed": seed,
         "condition": condition,
         "episode_id": episode_id,
         "outcome": outcome,
-        "team_reward": round(team_reward, 4),
+        "team_reward": round(cumulative_team_reward, 4),
         "value_left": env.left_value,
         "value_right": env.right_value,
         "best_item": env.best_item,
@@ -145,60 +352,66 @@ def run_episode(
     return record, details
 
 
-def ensure_ollama_ready(model: str, base_url: str) -> None:
-    status = check_ollama_setup(model=model, base_url=base_url)
-    if not status.ok:
-        raise SystemExit(status.guidance(model))
-
-
-def write_outputs(records: list[EpisodeRecord], details: list[dict[str, object]], csv_path: Path, jsonl_path: Path) -> None:
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-    dataframe = pd.DataFrame([asdict(record) for record in records])
-    dataframe.to_csv(csv_path, index=False)
-
-    with jsonl_path.open("w", encoding="utf-8") as handle:
-        for row in details:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    ensure_ollama_ready(model=args.model, base_url=args.base_url)
-
-    agents = {
-        "agent_a": OllamaAgent(agent_name="agent_a", model=args.model, base_url=args.base_url),
-        "agent_b": OllamaAgent(agent_name="agent_b", model=args.model, base_url=args.base_url),
-    }
+    paths = resolve_run_paths(args)
+    run_id = paths["run_id"].name
+    manifest = build_manifest(args, paths)
+    write_manifest(paths["manifest_path"], manifest)
 
     records: list[EpisodeRecord] = []
     details: list[dict[str, object]] = []
-    global_episode_id = 0
 
-    for condition_index, condition in enumerate(args.conditions):
-        for episode_offset in range(args.episodes):
-            seed = args.seed + condition_index * 10_000 + episode_offset
-            rng = np.random.default_rng(seed + 99)
-            env = ScoreGParallelEnv(grid_size=args.grid_size, max_steps=args.max_steps)
-            record, detail = run_episode(
-                env=env,
-                agents=agents,
-                condition=condition,
-                episode_id=global_episode_id,
-                seed=seed,
-                rng=rng,
-            )
-            records.append(record)
-            details.append(detail)
-            global_episode_id += 1
+    try:
+        manifest["status"] = "running"
+        write_manifest(paths["manifest_path"], manifest)
+        ensure_ollama_ready(model=args.model, base_url=args.base_url)
 
-    write_outputs(
-        records=records,
-        details=details,
-        csv_path=Path(args.output_csv),
-        jsonl_path=Path(args.output_jsonl),
-    )
-    print(f"Wrote {len(records)} episode records to {args.output_csv}")
+        agents = {
+            "agent_a": OllamaAgent(agent_name="agent_a", model=args.model, base_url=args.base_url),
+            "agent_b": OllamaAgent(agent_name="agent_b", model=args.model, base_url=args.base_url),
+        }
+
+        global_episode_id = 0
+        for condition_index, condition in enumerate(args.conditions):
+            for episode_offset in range(args.episodes):
+                seed = args.seed + condition_index * 10_000 + episode_offset
+                rng = np.random.default_rng(seed + 99)
+                env = ScoreGParallelEnv(grid_size=args.grid_size, max_steps=args.max_steps)
+                record, detail = run_episode(
+                    env=env,
+                    agents=agents,
+                    condition=condition,
+                    episode_id=global_episode_id,
+                    seed=seed,
+                    rng=rng,
+                    run_id=run_id,
+                    trace_path=paths["trace_path"],
+                    manifest=manifest,
+                    manifest_path=paths["manifest_path"],
+                )
+                records.append(record)
+                details.append(detail)
+                global_episode_id += 1
+
+        write_outputs(
+            records=records,
+            details=details,
+            csv_path=paths["results_csv_path"],
+            jsonl_path=paths["episodes_jsonl_path"],
+        )
+        manifest["status"] = "completed"
+        manifest["completed_at"] = utc_now_iso()
+        write_manifest(paths["manifest_path"], manifest)
+    except BaseException as exc:
+        manifest["status"] = "failed"
+        manifest["completed_at"] = utc_now_iso()
+        manifest["last_error_message"] = str(exc)
+        write_manifest(paths["manifest_path"], manifest)
+        raise
+
+    print(f"Wrote {len(records)} episode records to {paths['results_csv_path']}")
+    print(f"Run id: {run_id}")
     return 0
 
 
