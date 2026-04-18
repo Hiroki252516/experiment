@@ -1,7 +1,16 @@
 import json
 from pathlib import Path
 
-from viewer.data import available_conditions, available_episodes, filter_rows, list_run_manifests, load_trace_rows, tail_jsonl
+from viewer.data import (
+    available_conditions,
+    available_episodes,
+    filter_rows,
+    list_run_manifests,
+    load_trace_rows,
+    load_trace_tail_state,
+    manifest_status_message,
+    tail_jsonl,
+)
 
 
 def test_trace_jsonl_loading_and_filtering(tmp_path: Path) -> None:
@@ -37,3 +46,27 @@ def test_run_manifest_listing(tmp_path: Path) -> None:
     manifests = list_run_manifests(runs_dir)
     assert len(manifests) == 1
     assert manifests[0]["run_id"] == "run_test"
+
+
+def test_manifest_without_trace_still_loads(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "run_failed"
+    run_dir.mkdir(parents=True)
+    manifest_path = run_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "run_id": "run_failed",
+                "status": "failed",
+                "trace_path": str(tmp_path / "missing.jsonl"),
+                "last_error_message": "runner failed",
+                "started_at": "2026-04-18T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifests = list_run_manifests(runs_dir)
+    assert manifests[0]["run_id"] == "run_failed"
+    assert manifest_status_message(manifests[0]) == "runner failed"
+    tail_state = load_trace_tail_state(manifest=manifests[0], trace_offsets={})
+    assert tail_state["new_rows"] == []

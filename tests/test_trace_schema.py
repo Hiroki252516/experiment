@@ -1,4 +1,4 @@
-from scripts.run_experiment import build_trace_row, default_run_id
+from scripts.run_experiment import build_manifest, build_trace_row, default_run_id, parse_args, resolve_run_paths
 from envs.scoreg_env import ScoreGParallelEnv
 
 
@@ -55,3 +55,31 @@ def test_trace_row_has_required_keys() -> None:
     assert required_keys.issubset(row.keys())
     assert row["done"] is True
     assert row["outcome"] == "max_steps"
+
+
+def test_manifest_has_required_keys() -> None:
+    args = parse_args(["--episodes", "1", "--conditions", "comm", "--run-id", "run_test_manifest"])
+    paths = resolve_run_paths(args)
+    manifest = build_manifest(args, paths)
+    required_keys = {
+        "run_id",
+        "model",
+        "conditions",
+        "episodes_per_condition",
+        "base_seed",
+        "grid_size",
+        "max_steps",
+        "status",
+        "started_at",
+        "completed_at",
+        "trace_path",
+        "results_csv_path",
+        "episodes_jsonl_path",
+        "launcher_log_path",
+        "pid",
+        "current_condition",
+        "current_episode",
+        "last_step",
+        "last_error_message",
+    }
+    assert required_keys.issubset(manifest.keys())

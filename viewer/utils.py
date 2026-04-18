@@ -41,6 +41,18 @@ def resolve_python_executable(project_root: Path) -> str:
     return sys.executable
 
 
+def launcher_log_path(project_root: Path, run_id: str) -> Path:
+    return project_root / "logs" / "runs" / run_id / "launcher.log"
+
+
+def read_log_tail(log_path: str | Path, max_chars: int = 4000) -> str:
+    path = Path(log_path)
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    return text[-max_chars:]
+
+
 def start_experiment_process(
     *,
     project_root: Path,
@@ -50,7 +62,7 @@ def start_experiment_process(
     base_url: str,
     seed: int,
     run_id: str,
-) -> subprocess.Popen[Any]:
+) -> tuple[subprocess.Popen[Any], Path]:
     command = [
         resolve_python_executable(project_root),
         str(project_root / "scripts" / "run_experiment.py"),
@@ -67,13 +79,18 @@ def start_experiment_process(
         "--run-id",
         run_id,
     ]
-    return subprocess.Popen(
+    log_path = launcher_log_path(project_root, run_id)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("w", encoding="utf-8")
+    process = subprocess.Popen(
         command,
         cwd=project_root,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
         text=True,
     )
+    log_handle.close()
+    return process, log_path
 
 
 def process_running(process: Any) -> bool:

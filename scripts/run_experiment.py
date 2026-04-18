@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from dataclasses import asdict, dataclass
@@ -139,6 +140,8 @@ def build_manifest(args: argparse.Namespace, paths: dict[str, Path]) -> dict[str
         "trace_path": str(paths["trace_path"].resolve()),
         "results_csv_path": str(paths["results_csv_path"].resolve()),
         "episodes_jsonl_path": str(paths["episodes_jsonl_path"].resolve()),
+        "launcher_log_path": str((paths["run_dir"] / "launcher.log").resolve()),
+        "pid": -1,
         "current_condition": "",
         "current_episode": -1,
         "last_step": -1,
@@ -357,6 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     paths = resolve_run_paths(args)
     run_id = paths["run_id"].name
     manifest = build_manifest(args, paths)
+    manifest["pid"] = os.getpid()
     write_manifest(paths["manifest_path"], manifest)
 
     records: list[EpisodeRecord] = []

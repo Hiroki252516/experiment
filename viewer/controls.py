@@ -11,6 +11,7 @@ import streamlit as st
 DEFAULT_STATE: dict[str, Any] = {
     "mode": "live",
     "selected_run_id": "",
+    "pending_run_id": "",
     "selected_condition": "",
     "selected_episode": 0,
     "selected_step": 0,
@@ -18,6 +19,9 @@ DEFAULT_STATE: dict[str, Any] = {
     "playback_speed": 1.0,
     "active_process": None,
     "active_process_run_id": "",
+    "active_launcher_log_path": "",
+    "launch_error_message": "",
+    "launch_output_tail": "",
     "last_playback_tick": 0.0,
     "trace_offsets": {},
 }
@@ -31,10 +35,26 @@ def init_session_state() -> None:
 
 def sync_selected_run(manifests: list[dict[str, Any]]) -> None:
     run_ids = [manifest.get("run_id", "") for manifest in manifests]
+    pending_run_id = st.session_state.pending_run_id
+    if pending_run_id and pending_run_id not in run_ids:
+        st.session_state.selected_run_id = pending_run_id
+        return
+    if pending_run_id and pending_run_id in run_ids:
+        st.session_state.selected_run_id = pending_run_id
+        st.session_state.pending_run_id = ""
+        return
     if run_ids and st.session_state.selected_run_id not in run_ids:
         st.session_state.selected_run_id = run_ids[0]
     if not run_ids:
-        st.session_state.selected_run_id = ""
+        st.session_state.selected_run_id = pending_run_id or ""
+
+
+def reset_run_filters() -> None:
+    st.session_state.selected_condition = ""
+    st.session_state.selected_episode = 0
+    st.session_state.selected_step = 0
+    st.session_state.playing = False
+    st.session_state.last_playback_tick = 0.0
 
 
 def advance_playback(max_index: int) -> None:

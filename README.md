@@ -111,6 +111,7 @@ viewer には次の 3 モードがあります。
 - `launch`: GUI から experiment runner を起動
 
 GUI から起動した run は `logs/traces/<run_id>.jsonl` と `logs/runs/<run_id>/manifest.json` を出力し、viewer はそれを監視します。
+Launch 時の runner 標準出力と標準エラーは `logs/runs/<run_id>/launcher.log` に保存されます。
 
 別ターミナルで手動実行する場合:
 
@@ -166,7 +167,7 @@ Replay の使い方:
   まだ run が始まっていないか、`logs/traces/` に対象 run の trace がありません。Launch View から起動するか、別ターミナルで runner を実行してください。
 
 - viewer の Launch View で失敗する  
-  Ollama が未導入またはモデル未取得の可能性があります。runner 側の manifest に失敗理由が出ます。
+  Ollama が未導入またはモデル未取得の可能性があります。viewer 上の failure message、`logs/runs/<run_id>/manifest.json` の `last_error_message`、または `logs/runs/<run_id>/launcher.log` を確認してください。
 
 - replay に何も出ない  
   対象 run の trace が空、または選択した condition / episode に該当フレームがありません。

@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from viewer.controls import advance_playback, init_session_state, sync_selected_run
+from viewer.controls import advance_playback, init_session_state, reset_run_filters, sync_selected_run
 from viewer.data import (
     available_conditions,
     available_episodes,
@@ -20,10 +20,18 @@ from viewer.data import (
     filter_rows,
     list_run_manifests,
     load_trace_rows,
-    tail_jsonl,
+    load_trace_tail_state,
+    manifest_status_message,
 )
 from viewer.render import build_grid_html, glyph_rows_to_array
-from viewer.utils import format_event_line, format_timestamp, generate_run_id, process_running, start_experiment_process
+from viewer.utils import (
+    format_event_line,
+    format_timestamp,
+    generate_run_id,
+    process_running,
+    read_log_tail,
+    start_experiment_process,
+)
 
 RUNS_DIR = PROJECT_ROOT / "logs" / "runs"
 
@@ -46,15 +54,40 @@ def load_selected_rows(manifest: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 
 def render_header(manifest: dict[str, Any] | None) -> None:
-    run_id = manifest.get("run_id", "-") if manifest else "-"
+    run_id = manifest.get("run_id", st.session_state.pending_run_id or "-") if manifest else st.session_state.pending_run_id or "-"
     model = manifest.get("model", "-") if manifest else "-"
     st.title("ScoreG Realtime Viewer")
-    st.caption(
-        f"mode={st.session_state.mode} | run_id={run_id} | model={model}"
-    )
+    st.caption(f"mode={st.session_state.mode} | run_id={run_id} | model={model}")
 
 
-def render_launch_panel() -> None:
+def render_launch_status(manifest: dict[str, Any] | None) -> None:
+    if st.session_state.launch_error_message:
+        st.error(st.session_state.launch_error_message)
+    process_is_running = process_running(st.session_state.active_process)
+    if process_is_running:
+        st.info(f"Active subprocess is running for run_id={st.session_state.active_process_run_id}")
+    elif st.session_state.active_process_run_id:
+        return_code = st.session_state.active_process.poll() if st.session_state.active_process else None
+        st.caption(
+            f"Last launched run_id={st.session_state.active_process_run_id}, returncode={return_code}"
+        )
+    if manifest:
+        status_message = manifest_status_message(manifest)
+        if manifest.get("status") == "failed":
+            st.error(status_message)
+        elif manifest.get("status") in {"starting", "running"}:
+            st.info(status_message)
+        elif manifest.get("status") == "completed":
+            st.success(status_message)
+    if st.session_state.active_launcher_log_path:
+        tail = read_log_tail(st.session_state.active_launcher_log_path)
+        st.session_state.launch_output_tail = tail
+        if tail:
+            st.caption("Launcher output tail")
+            st.code(tail, language="text")
+
+
+def render_launch_panel(manifests: list[dict[str, Any]]) -> None:
     with st.expander("Launch View", expanded=False):
         process_is_running = process_running(st.session_state.active_process)
         with st.form("launch_form"):
@@ -70,27 +103,34 @@ def render_launch_panel() -> None:
             submitted = st.form_submit_button("Run experiment", disabled=process_is_running or not conditions)
         if submitted:
             run_id = generate_run_id()
-            process = start_experiment_process(
-                project_root=PROJECT_ROOT,
-                model=model,
-                episodes=int(episodes),
-                conditions=list(conditions),
-                base_url=base_url,
-                seed=int(seed),
-                run_id=run_id,
-            )
-            st.session_state.active_process = process
-            st.session_state.active_process_run_id = run_id
-            st.session_state.selected_run_id = run_id
-            st.session_state.mode = "live"
-            st.rerun()
-        if process_is_running:
-            st.info(f"Active subprocess is running for run_id={st.session_state.active_process_run_id}")
-        elif st.session_state.active_process_run_id:
-            return_code = st.session_state.active_process.poll()
-            st.caption(
-                f"Last launched run_id={st.session_state.active_process_run_id}, returncode={return_code}"
-            )
+            try:
+                process, log_path = start_experiment_process(
+                    project_root=PROJECT_ROOT,
+                    model=model,
+                    episodes=int(episodes),
+                    conditions=list(conditions),
+                    base_url=base_url,
+                    seed=int(seed),
+                    run_id=run_id,
+                )
+            except OSError as exc:
+                st.session_state.launch_error_message = f"Failed to start runner: {exc}"
+            else:
+                st.session_state.active_process = process
+                st.session_state.active_process_run_id = run_id
+                st.session_state.active_launcher_log_path = str(log_path)
+                st.session_state.pending_run_id = run_id
+                st.session_state.selected_run_id = run_id
+                st.session_state.launch_error_message = ""
+                st.session_state.mode = "live"
+                reset_run_filters()
+                sync_selected_run(manifests)
+                st.rerun()
+
+        manifest = selected_manifest(manifests)
+        if st.session_state.pending_run_id and (not manifest or manifest.get("run_id") != st.session_state.pending_run_id):
+            st.info(f"Pending run_id={st.session_state.pending_run_id}. Waiting for manifest to appear.")
+        render_launch_status(manifest)
 
 
 def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, Any]]) -> None:
@@ -100,20 +140,28 @@ def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, A
     condition_options = available_conditions(rows)
     if condition_options and st.session_state.selected_condition not in condition_options:
         st.session_state.selected_condition = condition_options[0]
+    if not condition_options:
+        st.session_state.selected_condition = ""
     episode_options = available_episodes(rows, st.session_state.selected_condition or None)
     if episode_options and st.session_state.selected_episode not in episode_options:
         st.session_state.selected_episode = episode_options[0]
+    if not episode_options:
+        st.session_state.selected_episode = 0
 
     col1, col2, col3, col4 = st.columns([1.2, 1.3, 1.3, 1.2])
     with col1:
         st.session_state.mode = st.radio("Mode", options=["live", "replay"], horizontal=True)
     with col2:
         if run_options:
-            st.session_state.selected_run_id = st.selectbox(
+            next_run = st.selectbox(
                 "Run",
                 options=run_options,
                 index=run_options.index(selected.get("run_id")) if selected else 0,
             )
+            if next_run != st.session_state.selected_run_id:
+                st.session_state.selected_run_id = next_run
+                st.session_state.pending_run_id = ""
+                reset_run_filters()
         else:
             st.selectbox("Run", options=[""], disabled=True)
     with col3:
@@ -142,7 +190,12 @@ def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, A
             episode=st.session_state.selected_episode,
         )
         max_step = max(int(row.get("step", 0)) for row in episode_rows) if episode_rows else 0
-        st.session_state.selected_step = st.slider("Step", min_value=0, max_value=max_step, value=min(st.session_state.selected_step, max_step))
+        st.session_state.selected_step = st.slider(
+            "Step",
+            min_value=0,
+            max_value=max_step,
+            value=min(st.session_state.selected_step, max_step),
+        )
         left, middle, right, speed_col = st.columns([1, 1, 1, 1.2])
         with left:
             if st.button("Prev"):
@@ -155,10 +208,14 @@ def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, A
             if st.button("Next"):
                 st.session_state.selected_step = min(max_step, st.session_state.selected_step + 1)
         with speed_col:
-            st.session_state.playback_speed = st.select_slider("Speed", options=[0.5, 1.0, 2.0, 4.0], value=float(st.session_state.playback_speed))
+            st.session_state.playback_speed = st.select_slider(
+                "Speed",
+                options=[0.5, 1.0, 2.0, 4.0],
+                value=float(st.session_state.playback_speed),
+            )
         advance_playback(max_step)
 
-    render_launch_panel()
+    render_launch_panel(manifests)
 
 
 def render_metrics(metrics: dict[str, Any]) -> None:
@@ -170,7 +227,17 @@ def render_metrics(metrics: dict[str, Any]) -> None:
     st.caption(f"Outcome breakdown: {metrics['outcome_breakdown']}")
 
 
-def render_agent_panel(agent_name: str, frame: dict[str, Any], *, sent_key: str, received_key: str, move_key: str, target_key: str, raw_key: str, private_value: int) -> None:
+def render_agent_panel(
+    agent_name: str,
+    frame: dict[str, Any],
+    *,
+    sent_key: str,
+    received_key: str,
+    move_key: str,
+    target_key: str,
+    raw_key: str,
+    private_value: int,
+) -> None:
     st.subheader(agent_name)
     st.write(
         {
@@ -198,9 +265,9 @@ def render_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manifest: d
         st.subheader("Live / Replay Status")
         st.write(
             {
-                "condition": frame.get("condition", "-"),
-                "episode": frame.get("episode", "-"),
-                "step": frame.get("step", "-"),
+                "condition": frame.get("condition", manifest.get("current_condition", "-") if manifest else "-"),
+                "episode": frame.get("episode", manifest.get("current_episode", "-") if manifest else "-"),
+                "step": frame.get("step", manifest.get("last_step", "-") if manifest else "-"),
                 "cumulative_reward": frame.get("cumulative_team_reward", frame.get("team_reward", 0.0)),
                 "outcome": frame.get("outcome", "-"),
                 "run_status": manifest.get("status", "-") if manifest else "-",
@@ -249,22 +316,33 @@ def render_live_section() -> None:
         sync_selected_run(manifests)
         manifest = selected_manifest(manifests)
         rows = load_selected_rows(manifest)
+        tail_state = load_trace_tail_state(
+            manifest=manifest,
+            trace_offsets=dict(st.session_state.trace_offsets),
+        )
+        st.session_state.trace_offsets = tail_state["trace_offsets"]
+
         if st.session_state.selected_condition:
             rows = filter_rows(rows, condition=st.session_state.selected_condition)
         if st.session_state.selected_episode in available_episodes(rows):
             rows = filter_rows(rows, episode=st.session_state.selected_episode)
-        if manifest and manifest.get("trace_path"):
-            trace_path = manifest["trace_path"]
-            offset_map = dict(st.session_state.trace_offsets)
-            trace_offset = int(offset_map.get(trace_path, 0))
-            _, next_offset = tail_jsonl(trace_path, trace_offset)
-            offset_map[trace_path] = next_offset
-            st.session_state.trace_offsets = offset_map
+
         frame = rows[-1] if rows else {}
         if not frame:
-            st.info("No live trace available yet. Start a run from Launch View or wait for logs.")
+            if manifest:
+                status_message = manifest_status_message(manifest)
+                if manifest.get("status") == "failed":
+                    st.error(status_message)
+                elif manifest.get("status") == "completed":
+                    st.warning(status_message)
+                else:
+                    st.info(status_message)
+            else:
+                st.info("No live trace available yet. Start a run from Launch View or wait for logs.")
+            render_launch_status(manifest)
             return
         render_panels(frame, rows, manifest)
+        render_launch_status(manifest)
 
     live_fragment()
 
@@ -276,11 +354,15 @@ def render_replay_section(manifest: dict[str, Any] | None, rows: list[dict[str, 
         episode=st.session_state.selected_episode,
     )
     if not filtered:
-        st.info("No replay frames available for the selected run and episode.")
+        if manifest:
+            st.info(manifest_status_message(manifest))
+        else:
+            st.info("No replay frames available for the selected run and episode.")
         return
     step_map = {int(row.get("step", 0)): row for row in filtered}
     frame = step_map.get(st.session_state.selected_step, filtered[-1])
     render_panels(frame, filtered, manifest)
+    render_launch_status(manifest)
 
 
 def main() -> None:

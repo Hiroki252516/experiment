@@ -45,6 +45,35 @@ def load_trace_rows(trace_path: str | Path) -> list[dict[str, Any]]:
     return parse_jsonl_lines(path.read_text(encoding="utf-8").splitlines())
 
 
+def load_trace_tail_state(
+    *,
+    manifest: dict[str, Any] | None,
+    trace_offsets: dict[str, int],
+) -> dict[str, Any]:
+    if not manifest or not manifest.get("trace_path"):
+        return {"new_rows": [], "trace_offsets": trace_offsets}
+    trace_path = str(manifest["trace_path"])
+    current_offset = int(trace_offsets.get(trace_path, 0))
+    new_rows, next_offset = tail_jsonl(trace_path, current_offset)
+    updated_offsets = dict(trace_offsets)
+    updated_offsets[trace_path] = next_offset
+    return {"new_rows": new_rows, "trace_offsets": updated_offsets}
+
+
+def manifest_status_message(manifest: dict[str, Any]) -> str:
+    status = str(manifest.get("status", "unknown"))
+    error = str(manifest.get("last_error_message", "")).strip()
+    if status == "failed":
+        return error or "Run failed."
+    if status == "starting":
+        return f"Run {manifest.get('run_id', '')} is starting. Waiting for trace output."
+    if status == "running":
+        return f"Run {manifest.get('run_id', '')} is running. Waiting for first step or additional trace rows."
+    if status == "completed":
+        return f"Run {manifest.get('run_id', '')} completed."
+    return f"Run status: {status}"
+
+
 def tail_jsonl(trace_path: str | Path, offset: int = 0) -> tuple[list[dict[str, Any]], int]:
     path = Path(trace_path)
     if not path.exists():
