@@ -59,6 +59,22 @@
 
 memory は重み更新ではなく、固定 LLM 上のセッション内慣習形成を観察するための補助です。
 
+## Prompt と action guard
+
+各エージェントは毎ターン `LEFT` または `RIGHT` の仮説 target を持って行動することを基本方針とします。
+
+- prompt では team reward 最大化を明示する
+- `UNKNOWN` は step 0 か本当に判断不能な場合だけに寄せる
+- `STAY` は target 上での待機など合理的理由がある場合だけに寄せる
+
+また、実験 runner では hidden information leakage を起こさない範囲で、最小限の action guard をかけます。
+
+- `step >= 1` の `UNKNOWN` は、その agent 自身の直前 target、または自分側アイテム仮説へ補正する
+- target 未到達時の不要な `STAY` は target への greedy move に補正する
+- target cell 上で両者が揃っているのに `STAY` した場合は `PICK` に補正する
+
+この guard は相手の hidden value や環境の真の最適解を使わず、各 agent の公開観測と自分の直前 target だけを使います。`raw JSON` にはモデル生出力を残し、trace 上の `move` / `target` は実際に env に渡した値を記録します。
+
 ## 限界
 
 - 本格的な multi-agent RL ではありません

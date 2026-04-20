@@ -236,15 +236,21 @@ def render_agent_panel(
     move_key: str,
     target_key: str,
     raw_key: str,
+    guard_applied_key: str,
+    guard_reason_key: str,
     private_value: int,
 ) -> None:
     st.subheader(agent_name)
+    guard_applied = bool(frame.get(guard_applied_key, False))
+    guard_reason = frame.get(guard_reason_key, "")
     st.write(
         {
             "position": frame.get("agent_a_pos" if agent_name == "agent_a" else "agent_b_pos"),
             "move": frame.get(move_key, ""),
             "target": frame.get(target_key, ""),
             "private_value": private_value,
+            "guard_applied": guard_applied,
+            "guard_reason": guard_reason or "",
             "error": frame.get("error_message", ""),
         }
     )
@@ -290,6 +296,8 @@ def render_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manifest: d
             move_key="move_a",
             target_key="target_a",
             raw_key="raw_a",
+            guard_applied_key="guard_a_applied",
+            guard_reason_key="guard_a_reason",
             private_value=int(frame.get("value_left", 0)),
         )
     with agent_b_col:
@@ -301,6 +309,8 @@ def render_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manifest: d
             move_key="move_b",
             target_key="target_b",
             raw_key="raw_b",
+            guard_applied_key="guard_b_applied",
+            guard_reason_key="guard_b_reason",
             private_value=int(frame.get("value_right", 0)),
         )
 

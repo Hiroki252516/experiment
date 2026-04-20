@@ -15,6 +15,8 @@ def test_trace_row_has_required_keys() -> None:
         received_rows={"agent_a": ["0" * 7 for _ in range(7)], "agent_b": ["0" * 7 for _ in range(7)]},
         moves={"agent_a": "STAY", "agent_b": "STAY"},
         targets={"agent_a": "UNKNOWN", "agent_b": "UNKNOWN"},
+        guard_applied={"agent_a": False, "agent_b": True},
+        guard_reasons={"agent_a": "", "agent_b": "stay_to_greedy_move"},
         raw_outputs={"agent_a": "{}", "agent_b": "{}"},
         rewards={"agent_a": -0.01, "agent_b": -0.01},
         cumulative_team_reward=-0.01,
@@ -43,6 +45,10 @@ def test_trace_row_has_required_keys() -> None:
         "move_b",
         "target_a",
         "target_b",
+        "guard_a_applied",
+        "guard_b_applied",
+        "guard_a_reason",
+        "guard_b_reason",
         "raw_a",
         "raw_b",
         "reward_a",
@@ -55,6 +61,7 @@ def test_trace_row_has_required_keys() -> None:
     assert required_keys.issubset(row.keys())
     assert row["done"] is True
     assert row["outcome"] == "max_steps"
+    assert row["guard_b_reason"] == "stay_to_greedy_move"
 
 
 def test_manifest_has_required_keys() -> None:

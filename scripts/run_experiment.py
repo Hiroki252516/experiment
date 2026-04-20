@@ -24,6 +24,7 @@ from agents.ollama_agent import (  # noqa: E402
     DEFAULT_OLLAMA_MODEL,
     AgentExecutionError,
     OllamaAgent,
+    apply_decision_guard,
     check_ollama_setup,
 )
 from envs.scoreg_env import GLYPH_SIDE, MOVE_TO_INDEX, ScoreGParallelEnv, glyph_matrix_to_rows  # noqa: E402
@@ -175,6 +176,8 @@ def build_trace_row(
     received_rows: dict[str, list[str]],
     moves: dict[str, str],
     targets: dict[str, str],
+    guard_applied: dict[str, bool],
+    guard_reasons: dict[str, str],
     raw_outputs: dict[str, str],
     rewards: dict[str, float],
     cumulative_team_reward: float,
@@ -203,6 +206,10 @@ def build_trace_row(
         "move_b": moves["agent_b"],
         "target_a": targets["agent_a"],
         "target_b": targets["agent_b"],
+        "guard_a_applied": guard_applied["agent_a"],
+        "guard_b_applied": guard_applied["agent_b"],
+        "guard_a_reason": guard_reasons["agent_a"],
+        "guard_b_reason": guard_reasons["agent_b"],
         "raw_a": raw_outputs["agent_a"],
         "raw_b": raw_outputs["agent_b"],
         "reward_a": round(rewards["agent_a"], 4),
@@ -260,6 +267,8 @@ def run_episode(
         }
         moves = {agent: "" for agent in AGENT_NAMES}
         targets = {agent: last_targets[agent] for agent in AGENT_NAMES}
+        guard_applied = {agent: False for agent in AGENT_NAMES}
+        guard_reasons = {agent: "" for agent in AGENT_NAMES}
         raw_outputs = {agent: "" for agent in AGENT_NAMES}
         rewards = {agent: 0.0 for agent in AGENT_NAMES}
         done = False
@@ -267,18 +276,30 @@ def run_episode(
         try:
             actions: dict[str, dict[str, object]] = {}
             for agent_name in env.agents:
-                turn = agents[agent_name].act(observations[agent_name])
+                turn = agents[agent_name].act(
+                    observations[agent_name],
+                    previous_target=last_targets[agent_name],
+                )
+                guarded = apply_decision_guard(
+                    agent_name=agent_name,
+                    observation=observations[agent_name],
+                    decision=turn.decision,
+                    previous_target=last_targets[agent_name],
+                    grid_size=env.grid_size,
+                )
                 glyph_matrix = override_glyph(condition, turn.decision.glyph_matrix(), rng)
                 glyph_rows = glyph_rows_from_matrix(glyph_matrix)
                 actions[agent_name] = {
-                    "move": MOVE_TO_INDEX[turn.decision.move],
+                    "move": MOVE_TO_INDEX[guarded.move],
                     "glyph": glyph_matrix,
                 }
                 sent_rows[agent_name] = glyph_rows
-                moves[agent_name] = turn.decision.move
-                targets[agent_name] = turn.decision.target
+                moves[agent_name] = guarded.move
+                targets[agent_name] = guarded.target
+                guard_applied[agent_name] = guarded.applied
+                guard_reasons[agent_name] = guarded.reason
                 raw_outputs[agent_name] = turn.raw_response_text
-                last_targets[agent_name] = turn.decision.target
+                last_targets[agent_name] = guarded.target
                 last_raw_outputs[agent_name] = turn.raw_response_text
 
             observations, rewards, terminations, truncations, _ = env.step(actions)
@@ -301,6 +322,8 @@ def run_episode(
             received_rows=received_rows,
             moves=moves,
             targets=targets,
+            guard_applied=guard_applied,
+            guard_reasons=guard_reasons,
             raw_outputs=raw_outputs,
             rewards=rewards,
             cumulative_team_reward=cumulative_team_reward,

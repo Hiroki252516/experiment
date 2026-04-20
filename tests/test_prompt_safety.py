@@ -22,9 +22,14 @@ def test_agent_a_prompt_does_not_include_right_value() -> None:
         observation=make_observation((7, 0)),
         memory=[],
         schema_json=json.dumps(AgentDecision.model_json_schema(), ensure_ascii=True),
+        current_hypothesis_target="LEFT",
     )
     assert "known_value=left_item=7" in prompt
     assert "right_item=9" not in prompt
+    assert "Maximize team reward" in prompt
+    assert "current_hypothesis_target=LEFT" in prompt
+    assert "Use UNKNOWN only at step 0" in prompt
+    assert "Use STAY only for a clear tactical reason" in prompt
 
 
 def test_agent_b_prompt_does_not_include_left_value() -> None:
@@ -33,6 +38,9 @@ def test_agent_b_prompt_does_not_include_left_value() -> None:
         observation=make_observation((0, 9)),
         memory=[],
         schema_json=json.dumps(AgentDecision.model_json_schema(), ensure_ascii=True),
+        current_hypothesis_target="RIGHT",
     )
     assert "known_value=right_item=9" in prompt
     assert "left_item=7" not in prompt
+    assert "Maximize team reward" in prompt
+    assert "current_hypothesis_target=RIGHT" in prompt

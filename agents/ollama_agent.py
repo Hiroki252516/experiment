@@ -74,6 +74,14 @@ class AgentTurn:
     raw_response_text: str
 
 
+@dataclass
+class DecisionGuardResult:
+    target: str
+    move: str
+    applied: bool
+    reason: str = ""
+
+
 class AgentExecutionError(RuntimeError):
     """Raised when the model cannot produce a valid structured action."""
 
@@ -93,6 +101,7 @@ def build_agent_user_prompt(
     observation: dict[str, np.ndarray],
     memory: list[str] | None,
     schema_json: str,
+    current_hypothesis_target: str | None = None,
 ) -> str:
     """Build a prompt with only public state and the agent's own private value."""
 
@@ -108,6 +117,7 @@ def build_agent_user_prompt(
     else:
         known_label = f"right_item={private_value[1]}"
 
+    hypothesis_target = current_hypothesis_target or resolve_hypothesis_target(agent_name, None)
     memory_lines = memory or ["none"]
     memory_block = "\n".join(f"- {line}" for line in memory_lines)
 
@@ -124,9 +134,17 @@ def build_agent_user_prompt(
             "Private observation:",
             f"- known_value={known_label}",
             "- The other item's value is hidden. Do not invent or state it.",
+            f"- current_hypothesis_target={hypothesis_target}",
             "",
             "Private memory notes:",
             memory_block,
+            "",
+            "Decision policy:",
+            "- Maximize team reward rather than playing passively.",
+            "- Try to keep a LEFT or RIGHT hypothesis target on every turn.",
+            "- Use UNKNOWN only at step 0 or when you truly cannot decide.",
+            "- Use STAY only for a clear tactical reason, such as waiting on the target cell.",
+            "- If your target is not reached yet, prefer moving toward it.",
             "",
             "Return JSON only. Follow this schema exactly:",
             schema_json,
@@ -137,6 +155,116 @@ def build_agent_user_prompt(
             "- target must be LEFT, RIGHT, or UNKNOWN",
             "- do not add explanations outside JSON",
         ]
+    )
+
+
+def default_target_for_agent(agent_name: str) -> str:
+    return "LEFT" if agent_name == "agent_a" else "RIGHT"
+
+
+def resolve_hypothesis_target(agent_name: str, previous_target: str | None) -> str:
+    if previous_target in {"LEFT", "RIGHT"}:
+        return previous_target
+    return default_target_for_agent(agent_name)
+
+
+def _target_position_from_observation(observation: dict[str, np.ndarray], target: str) -> np.ndarray:
+    item_positions = np.asarray(observation["item_positions"], dtype=np.int64)
+    target_index = 0 if target == "LEFT" else 1
+    return item_positions[target_index]
+
+
+def greedy_move_toward_target(
+    self_position: np.ndarray | list[int],
+    target_position: np.ndarray | list[int],
+) -> str:
+    current = np.asarray(self_position, dtype=np.int64)
+    target = np.asarray(target_position, dtype=np.int64)
+    row_delta = int(target[0] - current[0])
+    col_delta = int(target[1] - current[1])
+    if row_delta < 0:
+        return "UP"
+    if row_delta > 0:
+        return "DOWN"
+    if col_delta < 0:
+        return "LEFT"
+    if col_delta > 0:
+        return "RIGHT"
+    return "STAY"
+
+
+def _next_position_for_move(
+    self_position: np.ndarray | list[int],
+    move: str,
+    grid_size: int,
+) -> np.ndarray:
+    current = np.asarray(self_position, dtype=np.int64)
+    deltas = {
+        "UP": np.array([-1, 0], dtype=np.int64),
+        "DOWN": np.array([1, 0], dtype=np.int64),
+        "LEFT": np.array([0, -1], dtype=np.int64),
+        "RIGHT": np.array([0, 1], dtype=np.int64),
+        "STAY": np.array([0, 0], dtype=np.int64),
+        "PICK": np.array([0, 0], dtype=np.int64),
+    }
+    return np.clip(current + deltas[move], 0, grid_size - 1)
+
+
+def _manhattan_distance(position_a: np.ndarray | list[int], position_b: np.ndarray | list[int]) -> int:
+    first = np.asarray(position_a, dtype=np.int64)
+    second = np.asarray(position_b, dtype=np.int64)
+    return int(np.abs(first - second).sum())
+
+
+def apply_decision_guard(
+    agent_name: str,
+    observation: dict[str, np.ndarray],
+    decision: AgentDecision,
+    previous_target: str | None,
+    grid_size: int = 5,
+) -> DecisionGuardResult:
+    step_count = int(_as_int_list(observation["step_count"])[0])
+    effective_target = decision.target
+    effective_move = decision.move
+    reasons: list[str] = []
+
+    if effective_target == "UNKNOWN" and step_count >= 1:
+        effective_target = resolve_hypothesis_target(agent_name, previous_target)
+        reasons.append("target_unknown_after_step0")
+
+    if effective_target in {"LEFT", "RIGHT"}:
+        self_position = np.asarray(observation["self_position"], dtype=np.int64)
+        other_position = np.asarray(observation["other_position"], dtype=np.int64)
+        target_position = _target_position_from_observation(observation, effective_target)
+        on_target = bool(np.array_equal(self_position, target_position))
+        other_on_target = bool(np.array_equal(other_position, target_position))
+
+        if on_target:
+            if other_on_target and effective_move != "PICK":
+                effective_move = "PICK"
+                reasons.append("on_target_with_partner_to_pick")
+            elif not other_on_target and effective_move in {"UP", "DOWN", "LEFT", "RIGHT", "PICK"}:
+                effective_move = "STAY"
+                reasons.append("leave_target_to_stay")
+        elif effective_move == "STAY":
+            effective_move = greedy_move_toward_target(self_position, target_position)
+            reasons.append("stay_to_greedy_move")
+        elif effective_move == "PICK" and not on_target:
+            effective_move = greedy_move_toward_target(self_position, target_position)
+            reasons.append("invalid_pick_to_greedy_move")
+        elif effective_move in {"UP", "DOWN", "LEFT", "RIGHT"} and not on_target:
+            next_position = _next_position_for_move(self_position, effective_move, grid_size)
+            current_distance = _manhattan_distance(self_position, target_position)
+            next_distance = _manhattan_distance(next_position, target_position)
+            if next_distance >= current_distance:
+                effective_move = greedy_move_toward_target(self_position, target_position)
+                reasons.append("nonprogress_move_to_greedy_move")
+
+    return DecisionGuardResult(
+        target=effective_target,
+        move=effective_move,
+        applied=bool(reasons),
+        reason=",".join(reasons),
     )
 
 
@@ -220,13 +348,14 @@ class OllamaAgent:
         self.system_prompt = load_system_prompt(self.system_prompt_path)
         self.memory: list[str] = []
 
-    def act(self, observation: dict[str, np.ndarray]) -> AgentTurn:
+    def act(self, observation: dict[str, np.ndarray], previous_target: str | None = None) -> AgentTurn:
         schema_json = json.dumps(AgentDecision.model_json_schema(), ensure_ascii=True)
         user_prompt = build_agent_user_prompt(
             agent_name=self.agent_name,
             observation=observation,
             memory=self.memory,
             schema_json=schema_json,
+            current_hypothesis_target=resolve_hypothesis_target(self.agent_name, previous_target),
         )
         last_error = "unknown error"
         messages = [
