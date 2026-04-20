@@ -57,6 +57,15 @@ def reset_run_filters() -> None:
     st.session_state.last_playback_tick = 0.0
 
 
+def resolve_option_index(options: list[Any], value: Any, default: int = 0) -> int:
+    if not options:
+        return default
+    try:
+        return options.index(value)
+    except ValueError:
+        return default
+
+
 def advance_playback(max_index: int) -> None:
     if not st.session_state.playing:
         return

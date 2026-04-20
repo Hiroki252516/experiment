@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from viewer.controls import resolve_option_index
 from viewer.data import manifest_status_message
 from viewer.utils import launcher_log_path, read_log_tail
 
@@ -38,3 +39,9 @@ def test_launcher_log_tail_and_failed_message(tmp_path: Path) -> None:
     log_path.write_text("line1\nline2\nfailure details\n", encoding="utf-8")
     assert "failure details" in read_log_tail(log_path)
     assert manifest_status_message({"status": "failed", "last_error_message": "boom"}) == "boom"
+
+
+def test_resolve_option_index_falls_back_to_zero_when_value_is_missing() -> None:
+    assert resolve_option_index(["comm", "silent"], "") == 0
+    assert resolve_option_index([0, 1], 99) == 0
+    assert resolve_option_index([], "comm") == 0

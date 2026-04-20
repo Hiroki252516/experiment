@@ -12,7 +12,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from viewer.controls import advance_playback, init_session_state, reset_run_filters, sync_selected_run
+from viewer.controls import (
+    advance_playback,
+    init_session_state,
+    reset_run_filters,
+    resolve_option_index,
+    sync_selected_run,
+)
 from viewer.data import (
     available_conditions,
     available_episodes,
@@ -162,6 +168,7 @@ def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, A
                 st.session_state.selected_run_id = next_run
                 st.session_state.pending_run_id = ""
                 reset_run_filters()
+                st.rerun()
         else:
             st.selectbox("Run", options=[""], disabled=True)
     with col3:
@@ -169,7 +176,7 @@ def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, A
             st.session_state.selected_condition = st.selectbox(
                 "Condition",
                 options=condition_options,
-                index=condition_options.index(st.session_state.selected_condition),
+                index=resolve_option_index(condition_options, st.session_state.selected_condition),
             )
         else:
             st.selectbox("Condition", options=[""], disabled=True)
@@ -178,7 +185,7 @@ def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, A
             st.session_state.selected_episode = st.selectbox(
                 "Episode",
                 options=episode_options,
-                index=episode_options.index(st.session_state.selected_episode),
+                index=resolve_option_index(episode_options, st.session_state.selected_episode),
             )
         else:
             st.selectbox("Episode", options=[0], disabled=True)
