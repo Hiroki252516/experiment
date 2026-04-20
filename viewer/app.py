@@ -23,13 +23,16 @@ from viewer.data import (
     available_conditions,
     available_episodes,
     compute_metrics,
+    convention_hints,
     filter_rows,
     list_run_manifests,
     load_trace_rows,
     load_trace_tail_state,
     manifest_status_message,
+    recent_glyph_history,
+    recent_received_history,
 )
-from viewer.render import build_grid_html, glyph_rows_to_array
+from viewer.render import build_grid_html, glyph_history_arrays, glyph_rows_to_array
 from viewer.utils import (
     format_event_line,
     format_timestamp,
@@ -99,6 +102,7 @@ def render_launch_panel(manifests: list[dict[str, Any]]) -> None:
         with st.form("launch_form"):
             model = st.text_input("Model name", value="gemma3:1b")
             episodes = st.number_input("Episodes per condition", min_value=1, max_value=1000, value=5)
+            comm_phase_steps = st.number_input("Comm-only steps", min_value=0, max_value=10, value=2)
             conditions = st.multiselect(
                 "Conditions",
                 options=["comm", "silent", "random"],
@@ -106,6 +110,9 @@ def render_launch_panel(manifests: list[dict[str, Any]]) -> None:
             )
             base_url = st.text_input("Base URL", value="http://localhost:11434")
             seed = st.number_input("Seed", min_value=0, value=42)
+            randomize_positions = st.checkbox("Randomize positions", value=True)
+            hard_split_prob = st.slider("Hard split probability", min_value=0.0, max_value=1.0, value=0.5)
+            memory_budget = st.number_input("Memory budget", min_value=1, max_value=200, value=20)
             submitted = st.form_submit_button("Run experiment", disabled=process_is_running or not conditions)
         if submitted:
             run_id = generate_run_id()
@@ -118,6 +125,10 @@ def render_launch_panel(manifests: list[dict[str, Any]]) -> None:
                     base_url=base_url,
                     seed=int(seed),
                     run_id=run_id,
+                    comm_phase_steps=int(comm_phase_steps),
+                    randomize_positions=bool(randomize_positions),
+                    hard_split_prob=float(hard_split_prob),
+                    memory_budget=int(memory_budget),
                 )
             except OSError as exc:
                 st.session_state.launch_error_message = f"Failed to start runner: {exc}"
@@ -226,17 +237,21 @@ def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, A
 
 
 def render_metrics(metrics: dict[str, Any]) -> None:
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("Episodes", metrics["episodes"])
     col2.metric("Success rate", f"{metrics['success_rate']:.2%}")
     col3.metric("Average reward", f"{metrics['average_reward']:.3f}")
     col4.metric("Target agreement", f"{metrics['target_agreement_rate']:.2%}")
+    col5.metric("Glyph reuse", f"{metrics['glyph_reuse_consistency']:.2%}")
+    col6.metric("Glyph-target assoc", f"{metrics['glyph_target_association']:.2%}")
+    st.caption(f"Target flip rate: {metrics['target_flip_rate']:.2%}")
     st.caption(f"Outcome breakdown: {metrics['outcome_breakdown']}")
 
 
 def render_agent_panel(
     agent_name: str,
     frame: dict[str, Any],
+    rows: list[dict[str, Any]],
     *,
     sent_key: str,
     received_key: str,
@@ -250,11 +265,18 @@ def render_agent_panel(
     st.subheader(agent_name)
     guard_applied = bool(frame.get(guard_applied_key, False))
     guard_reason = frame.get(guard_reason_key, "")
+    initial_target_key = "initial_target_a" if agent_name == "agent_a" else "initial_target_b"
+    final_target_key = "final_target_a" if agent_name == "agent_a" else "final_target_b"
+    target_changed_key = "target_changed_a" if agent_name == "agent_a" else "target_changed_b"
     st.write(
         {
+            "phase": frame.get("phase", ""),
             "position": frame.get("agent_a_pos" if agent_name == "agent_a" else "agent_b_pos"),
             "move": frame.get(move_key, ""),
             "target": frame.get(target_key, ""),
+            "initial_target": frame.get(initial_target_key, "UNKNOWN"),
+            "final_target": frame.get(final_target_key, frame.get(target_key, "")),
+            "target_changed": bool(frame.get(target_changed_key, False)),
             "private_value": private_value,
             "guard_applied": guard_applied,
             "guard_reason": guard_reason or "",
@@ -268,6 +290,18 @@ def render_agent_panel(
     with received_col:
         st.caption("Received glyph")
         st.image(glyph_rows_to_array(frame.get(received_key, ["0" * 7] * 7)), clamp=True)
+    sent_history = glyph_history_arrays(recent_glyph_history(rows, agent_name=agent_name))
+    received_history = glyph_history_arrays(recent_received_history(rows, agent_name=agent_name))
+    if sent_history:
+        st.caption("Sent glyph history")
+        history_cols = st.columns(len(sent_history))
+        for column, image in zip(history_cols, sent_history):
+            column.image(image, clamp=True)
+    if received_history:
+        st.caption("Received glyph history")
+        history_cols = st.columns(len(received_history))
+        for column, image in zip(history_cols, received_history):
+            column.image(image, clamp=True)
     st.caption("Raw JSON output")
     st.code(frame.get(raw_key, ""), language="json")
 
@@ -281,6 +315,8 @@ def render_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manifest: d
                 "condition": frame.get("condition", manifest.get("current_condition", "-") if manifest else "-"),
                 "episode": frame.get("episode", manifest.get("current_episode", "-") if manifest else "-"),
                 "step": frame.get("step", manifest.get("last_step", "-") if manifest else "-"),
+                "phase": frame.get("phase", "-"),
+                "movement_enabled": frame.get("movement_enabled", "-"),
                 "cumulative_reward": frame.get("cumulative_team_reward", frame.get("team_reward", 0.0)),
                 "outcome": frame.get("outcome", "-"),
                 "run_status": manifest.get("status", "-") if manifest else "-",
@@ -298,6 +334,7 @@ def render_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manifest: d
         render_agent_panel(
             "agent_a",
             frame,
+            rows,
             sent_key="glyph_a_sent",
             received_key="glyph_a_received",
             move_key="move_a",
@@ -311,6 +348,7 @@ def render_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manifest: d
         render_agent_panel(
             "agent_b",
             frame,
+            rows,
             sent_key="glyph_b_sent",
             received_key="glyph_b_received",
             move_key="move_b",
@@ -320,6 +358,25 @@ def render_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manifest: d
             guard_reason_key="guard_b_reason",
             private_value=int(frame.get("value_right", 0)),
         )
+
+    st.subheader("Convention Hints Panel")
+    hints = convention_hints(rows, condition=str(frame.get("condition", "")) or None, limit=3)
+    if hints:
+        for hint in hints:
+            hint_cols = st.columns([1, 3])
+            with hint_cols[0]:
+                if hint.get("glyph_rows"):
+                    st.image(glyph_rows_to_array(hint["glyph_rows"], scale=10), clamp=True)
+            with hint_cols[1]:
+                st.write(
+                    {
+                        "count": hint.get("count", 0),
+                        "dominant_target": hint.get("dominant_target", "UNKNOWN"),
+                        "success_count": hint.get("success_count", 0),
+                    }
+                )
+    else:
+        st.caption("No convention hints available yet.")
 
     st.subheader("Timeline / Event Log Panel")
     for row in rows[-10:]:

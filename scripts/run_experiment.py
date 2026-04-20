@@ -24,7 +24,9 @@ from agents.ollama_agent import (  # noqa: E402
     DEFAULT_OLLAMA_MODEL,
     AgentExecutionError,
     OllamaAgent,
+    agent_known_value,
     apply_decision_guard,
+    build_memory_summary,
     check_ollama_setup,
 )
 from envs.scoreg_env import GLYPH_SIDE, MOVE_TO_INDEX, ScoreGParallelEnv, glyph_matrix_to_rows  # noqa: E402
@@ -32,10 +34,12 @@ from envs.scoreg_env import GLYPH_SIDE, MOVE_TO_INDEX, ScoreGParallelEnv, glyph_
 CONDITIONS = ("comm", "silent", "random")
 AGENT_NAMES = ("agent_a", "agent_b")
 ZERO_GLYPH_ROWS = ["0" * GLYPH_SIDE for _ in range(GLYPH_SIDE)]
+PROMPT_VERSION = "frozen_llm_glyph_emergence_v1"
 
 
 @dataclass
 class EpisodeRecord:
+    run_id: str
     seed: int
     condition: str
     episode_id: int
@@ -83,6 +87,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Base random seed.")
     parser.add_argument("--grid-size", type=int, default=5)
     parser.add_argument("--max-steps", type=int, default=10)
+    parser.add_argument("--comm-phase-steps", type=int, default=0, help="Number of opening glyph-only steps.")
+    parser.add_argument(
+        "--randomize-positions",
+        action="store_true",
+        help="Randomize agent and item positions each episode.",
+    )
+    parser.add_argument(
+        "--hard-split-prob",
+        type=float,
+        default=0.0,
+        help="Probability of sampling a large value gap between left and right items.",
+    )
+    parser.add_argument(
+        "--memory-budget",
+        type=int,
+        default=6,
+        help="Maximum number of private memory summaries retained per agent.",
+    )
     parser.add_argument("--output-csv", default="logs/results.csv")
     parser.add_argument("--output-jsonl", default="logs/episodes.jsonl")
     parser.add_argument("--run-id", default="", help="Optional explicit run id for viewer integration.")
@@ -97,10 +119,6 @@ def override_glyph(condition: str, glyph: np.ndarray, rng: np.random.Generator) 
     if condition == "silent":
         return np.zeros((GLYPH_SIDE, GLYPH_SIDE), dtype=np.int8)
     return rng.integers(0, 2, size=(GLYPH_SIDE, GLYPH_SIDE), dtype=np.int8)
-
-
-def build_agent_summary(agent_name: str, target: str, outcome: str, agreed: bool) -> str:
-    return f"episode outcome={outcome}; agent={agent_name}; self_target={target}; agreement={agreed}"
 
 
 def ensure_ollama_ready(model: str, base_url: str) -> None:
@@ -135,6 +153,11 @@ def build_manifest(args: argparse.Namespace, paths: dict[str, Path]) -> dict[str
         "base_seed": args.seed,
         "grid_size": args.grid_size,
         "max_steps": args.max_steps,
+        "comm_phase_steps": args.comm_phase_steps,
+        "randomize_positions": args.randomize_positions,
+        "hard_split_prob": args.hard_split_prob,
+        "memory_budget": args.memory_budget,
+        "prompt_version": PROMPT_VERSION,
         "status": "starting",
         "started_at": utc_now_iso(),
         "completed_at": "",
@@ -165,17 +188,27 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
         handle.flush()
 
 
+def trace_target(initial_target: str, final_target: str) -> tuple[str, str, bool]:
+    initial = initial_target if initial_target in {"LEFT", "RIGHT"} else "UNKNOWN"
+    final = final_target if final_target in {"LEFT", "RIGHT"} else "UNKNOWN"
+    changed = initial in {"LEFT", "RIGHT"} and final in {"LEFT", "RIGHT"} and initial != final
+    return initial, final, changed
+
+
 def build_trace_row(
     *,
     run_id: str,
     condition: str,
     episode_id: int,
     step: int,
+    phase: str,
+    movement_enabled: bool,
     env: ScoreGParallelEnv,
     sent_rows: dict[str, list[str]],
     received_rows: dict[str, list[str]],
     moves: dict[str, str],
     targets: dict[str, str],
+    initial_targets: dict[str, str],
     guard_applied: dict[str, bool],
     guard_reasons: dict[str, str],
     raw_outputs: dict[str, str],
@@ -185,12 +218,16 @@ def build_trace_row(
     outcome: str,
     error_message: str,
 ) -> dict[str, Any]:
+    initial_target_a, final_target_a, target_changed_a = trace_target(initial_targets["agent_a"], targets["agent_a"])
+    initial_target_b, final_target_b, target_changed_b = trace_target(initial_targets["agent_b"], targets["agent_b"])
     return {
         "run_id": run_id,
         "timestamp": utc_now_iso(),
         "condition": condition,
         "episode": episode_id,
         "step": step,
+        "phase": phase,
+        "movement_enabled": movement_enabled,
         "agent_a_pos": int_list(env.agent_positions["agent_a"]),
         "agent_b_pos": int_list(env.agent_positions["agent_b"]),
         "left_item_pos": int_list(env.item_positions["LEFT"]),
@@ -206,6 +243,12 @@ def build_trace_row(
         "move_b": moves["agent_b"],
         "target_a": targets["agent_a"],
         "target_b": targets["agent_b"],
+        "initial_target_a": initial_target_a,
+        "initial_target_b": initial_target_b,
+        "final_target_a": final_target_a,
+        "final_target_b": final_target_b,
+        "target_changed_a": target_changed_a,
+        "target_changed_b": target_changed_b,
         "guard_a_applied": guard_applied["agent_a"],
         "guard_b_applied": guard_applied["agent_b"],
         "guard_a_reason": guard_reasons["agent_a"],
@@ -222,7 +265,12 @@ def build_trace_row(
     }
 
 
-def write_outputs(records: list[EpisodeRecord], details: list[dict[str, object]], csv_path: Path, jsonl_path: Path) -> None:
+def write_outputs(
+    records: list[EpisodeRecord],
+    details: list[dict[str, object]],
+    csv_path: Path,
+    jsonl_path: Path,
+) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
     dataframe = pd.DataFrame([asdict(record) for record in records])
@@ -249,7 +297,11 @@ def run_episode(
     observations, _ = env.reset(seed=seed)
     cumulative_team_reward = 0.0
     last_targets = {agent: "UNKNOWN" for agent in AGENT_NAMES}
+    initial_targets = {agent: "UNKNOWN" for agent in AGENT_NAMES}
     last_raw_outputs = {agent: "" for agent in AGENT_NAMES}
+    last_sent_rows = {agent: zero_trace_row() for agent in AGENT_NAMES}
+    last_received_rows = {agent: zero_trace_row() for agent in AGENT_NAMES}
+    last_observations = {agent: observations[agent] for agent in AGENT_NAMES}
     error_message = ""
     outcome = "max_steps"
 
@@ -260,6 +312,8 @@ def run_episode(
 
     while env.agents:
         step = observation_step(observations)
+        movement_enabled = env.movement_enabled
+        phase = env.current_phase
         sent_rows = {agent: zero_trace_row() for agent in AGENT_NAMES}
         received_rows = {
             "agent_a": glyph_rows_from_matrix(observations["agent_a"]["other_last_glyph"]),
@@ -287,20 +341,34 @@ def run_episode(
                     previous_target=last_targets[agent_name],
                     grid_size=env.grid_size,
                 )
+                executed_move = guarded.move
+                guard_reason = guarded.reason
+                guard_used = guarded.applied
+                if not movement_enabled:
+                    executed_move = "STAY"
+                    if guarded.move != "STAY":
+                        guard_reason = ",".join(filter(None, [guard_reason, "comm_phase_forced_stay"]))
+                        guard_used = True
+
                 glyph_matrix = override_glyph(condition, turn.decision.glyph_matrix(), rng)
                 glyph_rows = glyph_rows_from_matrix(glyph_matrix)
                 actions[agent_name] = {
-                    "move": MOVE_TO_INDEX[guarded.move],
+                    "move": MOVE_TO_INDEX[executed_move],
                     "glyph": glyph_matrix,
                 }
                 sent_rows[agent_name] = glyph_rows
-                moves[agent_name] = guarded.move
+                moves[agent_name] = executed_move
                 targets[agent_name] = guarded.target
-                guard_applied[agent_name] = guarded.applied
-                guard_reasons[agent_name] = guarded.reason
+                guard_applied[agent_name] = guard_used
+                guard_reasons[agent_name] = guard_reason
                 raw_outputs[agent_name] = turn.raw_response_text
                 last_targets[agent_name] = guarded.target
                 last_raw_outputs[agent_name] = turn.raw_response_text
+                last_sent_rows[agent_name] = glyph_rows
+                last_received_rows[agent_name] = received_rows[agent_name]
+                last_observations[agent_name] = observations[agent_name]
+                if initial_targets[agent_name] == "UNKNOWN" and guarded.target in {"LEFT", "RIGHT"}:
+                    initial_targets[agent_name] = guarded.target
 
             observations, rewards, terminations, truncations, _ = env.step(actions)
             cumulative_team_reward += rewards["agent_a"]
@@ -317,11 +385,14 @@ def run_episode(
             condition=condition,
             episode_id=episode_id,
             step=step,
+            phase=phase,
+            movement_enabled=movement_enabled,
             env=env,
             sent_rows=sent_rows,
             received_rows=received_rows,
             moves=moves,
             targets=targets,
+            initial_targets=initial_targets,
             guard_applied=guard_applied,
             guard_reasons=guard_reasons,
             raw_outputs=raw_outputs,
@@ -340,13 +411,36 @@ def run_episode(
 
     agreed = last_targets["agent_a"] == last_targets["agent_b"] and last_targets["agent_a"] in {"LEFT", "RIGHT"}
     agents["agent_a"].record_episode_summary(
-        build_agent_summary("agent_a", last_targets["agent_a"], outcome, agreed)
+        build_memory_summary(
+            episode_id=episode_id,
+            condition=condition,
+            agent_name="agent_a",
+            known_value=agent_known_value("agent_a", last_observations["agent_a"]),
+            sent_glyph_rows=last_sent_rows["agent_a"],
+            received_glyph_rows=last_received_rows["agent_a"],
+            target=last_targets["agent_a"],
+            agreement=agreed,
+            team_reward=cumulative_team_reward,
+            outcome=outcome,
+        )
     )
     agents["agent_b"].record_episode_summary(
-        build_agent_summary("agent_b", last_targets["agent_b"], outcome, agreed)
+        build_memory_summary(
+            episode_id=episode_id,
+            condition=condition,
+            agent_name="agent_b",
+            known_value=agent_known_value("agent_b", last_observations["agent_b"]),
+            sent_glyph_rows=last_sent_rows["agent_b"],
+            received_glyph_rows=last_received_rows["agent_b"],
+            target=last_targets["agent_b"],
+            agreement=agreed,
+            team_reward=cumulative_team_reward,
+            outcome=outcome,
+        )
     )
 
     record = EpisodeRecord(
+        run_id=run_id,
         seed=seed,
         condition=condition,
         episode_id=episode_id,
@@ -371,6 +465,8 @@ def run_episode(
         "best_item": env.best_item,
         "target_a": last_targets["agent_a"],
         "target_b": last_targets["agent_b"],
+        "initial_target_a": initial_targets["agent_a"],
+        "initial_target_b": initial_targets["agent_b"],
         "final_raw_output_a": last_raw_outputs["agent_a"],
         "final_raw_output_b": last_raw_outputs["agent_b"],
         "error_message": error_message,
@@ -395,8 +491,18 @@ def main(argv: list[str] | None = None) -> int:
         ensure_ollama_ready(model=args.model, base_url=args.base_url)
 
         agents = {
-            "agent_a": OllamaAgent(agent_name="agent_a", model=args.model, base_url=args.base_url),
-            "agent_b": OllamaAgent(agent_name="agent_b", model=args.model, base_url=args.base_url),
+            "agent_a": OllamaAgent(
+                agent_name="agent_a",
+                model=args.model,
+                base_url=args.base_url,
+                memory_limit=args.memory_budget,
+            ),
+            "agent_b": OllamaAgent(
+                agent_name="agent_b",
+                model=args.model,
+                base_url=args.base_url,
+                memory_limit=args.memory_budget,
+            ),
         }
 
         global_episode_id = 0
@@ -404,7 +510,13 @@ def main(argv: list[str] | None = None) -> int:
             for episode_offset in range(args.episodes):
                 seed = args.seed + condition_index * 10_000 + episode_offset
                 rng = np.random.default_rng(seed + 99)
-                env = ScoreGParallelEnv(grid_size=args.grid_size, max_steps=args.max_steps)
+                env = ScoreGParallelEnv(
+                    grid_size=args.grid_size,
+                    max_steps=args.max_steps,
+                    comm_phase_steps=args.comm_phase_steps,
+                    randomize_positions=args.randomize_positions,
+                    hard_split_prob=args.hard_split_prob,
+                )
                 record, detail = run_episode(
                     env=env,
                     agents=agents,

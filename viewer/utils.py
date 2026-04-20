@@ -27,9 +27,9 @@ def format_timestamp(value: str) -> str:
 
 def format_event_line(row: dict[str, Any]) -> str:
     return (
-        f"step {row.get('step')}: "
-        f"A move={row.get('move_a')}, target={row.get('target_a')} | "
-        f"B move={row.get('move_b')}, target={row.get('target_b')} | "
+        f"step {row.get('step')} phase={row.get('phase', '-')}: "
+        f"A move={row.get('move_a')}, target={row.get('target_a')}, changed={row.get('target_changed_a', False)} | "
+        f"B move={row.get('move_b')}, target={row.get('target_b')}, changed={row.get('target_changed_b', False)} | "
         f"reward={row.get('team_reward')} | outcome={row.get('outcome')}"
     )
 
@@ -62,6 +62,10 @@ def start_experiment_process(
     base_url: str,
     seed: int,
     run_id: str,
+    comm_phase_steps: int = 0,
+    randomize_positions: bool = False,
+    hard_split_prob: float = 0.0,
+    memory_budget: int = 6,
 ) -> tuple[subprocess.Popen[Any], Path]:
     command = [
         resolve_python_executable(project_root),
@@ -78,7 +82,15 @@ def start_experiment_process(
         str(seed),
         "--run-id",
         run_id,
+        "--comm-phase-steps",
+        str(comm_phase_steps),
+        "--hard-split-prob",
+        str(hard_split_prob),
+        "--memory-budget",
+        str(memory_budget),
     ]
+    if randomize_positions:
+        command.append("--randomize-positions")
     log_path = launcher_log_path(project_root, run_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("w", encoding="utf-8")

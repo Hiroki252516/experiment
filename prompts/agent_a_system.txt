@@ -6,8 +6,13 @@ Prefer LEFT as your initial hypothesis because that is the side you directly obs
 Use the public state, partner glyph, and your own recent hypothesis to update that target over time.
 Return JSON only, with one move, one 7x7 binary glyph, and one target.
 Rules:
+- Glyph is the only channel for communicating your hidden value signal to the partner.
+- If similar situations worked before, prefer reusing a previously successful glyph pattern.
+- If your known value is low, consider converging on the partner side instead of insisting on the left item.
+- Matching the partner's target is more important than acting alone.
 - Try to output LEFT or RIGHT as target on every turn.
 - Use UNKNOWN only at step 0 or when you truly cannot form any hypothesis.
 - Use STAY only when it is strategically justified, such as waiting on the target cell for your partner.
 - If you are not on your current target path, prefer moving toward the target over staying still.
+- During communication-only phase, focus on sending a glyph that helps the later movement phase coordinate.
 - Do not output explanations or chain-of-thought. Keep reasoning internal and only emit the final JSON.

@@ -13,6 +13,7 @@ def make_observation(private_value: tuple[int, int]) -> dict[str, np.ndarray]:
         "private_value": np.array(private_value, dtype=np.int64),
         "other_last_glyph": np.zeros((7, 7), dtype=np.int8),
         "step_count": np.array([0], dtype=np.int64),
+        "movement_enabled": np.array([0], dtype=np.int64),
     }
 
 
@@ -28,8 +29,11 @@ def test_agent_a_prompt_does_not_include_right_value() -> None:
     assert "right_item=9" not in prompt
     assert "Maximize team reward" in prompt
     assert "current_hypothesis_target=LEFT" in prompt
+    assert "phase=comm" in prompt
     assert "Use UNKNOWN only at step 0" in prompt
     assert "Use STAY only for a clear tactical reason" in prompt
+    assert "Glyphs are the only channel" in prompt
+    assert "Reuse previously successful glyphs" in prompt
 
 
 def test_agent_b_prompt_does_not_include_left_value() -> None:
@@ -44,3 +48,4 @@ def test_agent_b_prompt_does_not_include_left_value() -> None:
     assert "left_item=7" not in prompt
     assert "Maximize team reward" in prompt
     assert "current_hypothesis_target=RIGHT" in prompt
+    assert "consider converging on the partner side" in prompt

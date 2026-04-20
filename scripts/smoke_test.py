@@ -25,7 +25,7 @@ def main() -> int:
     return run_experiment_main(
         [
             "--episodes",
-            "3",
+            "5",
             "--conditions",
             "comm",
             "silent",
@@ -34,6 +34,13 @@ def main() -> int:
             args.model,
             "--base-url",
             args.base_url,
+            "--comm-phase-steps",
+            "2",
+            "--randomize-positions",
+            "--hard-split-prob",
+            "0.5",
+            "--memory-budget",
+            "20",
             "--output-csv",
             "logs/results.csv",
             "--output-jsonl",

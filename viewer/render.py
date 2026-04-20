@@ -21,6 +21,10 @@ def glyph_rows_to_array(rows: list[str], scale: int = 16) -> np.ndarray:
     return np.repeat(np.repeat(grayscale, scale, axis=0), scale, axis=1)
 
 
+def glyph_history_arrays(history_rows: list[list[str]], scale: int = 10) -> list[np.ndarray]:
+    return [glyph_rows_to_array(rows, scale=scale) for rows in history_rows if rows]
+
+
 def _cell_entities(frame: dict[str, Any], row_index: int, col_index: int) -> tuple[list[str], str, bool]:
     labels: list[str] = []
     accents: list[str] = []
@@ -46,6 +50,7 @@ def _cell_entities(frame: dict[str, Any], row_index: int, col_index: int) -> tup
 
 
 def build_grid_html(frame: dict[str, Any], grid_size: int = 5) -> str:
+    phase = html.escape(str(frame.get("phase", "move")))
     rows_html: list[str] = []
     for row_index in range(grid_size):
         cells: list[str] = []
@@ -62,8 +67,8 @@ def build_grid_html(frame: dict[str, Any], grid_size: int = 5) -> str:
             )
             cells.append(cell_html)
         rows_html.append("<tr>" + "".join(cells) + "</tr>")
-    return (
-        "<table style='border-collapse:collapse;margin:0 auto;'>"
-        + "".join(rows_html)
-        + "</table>"
+    phase_html = (
+        f"<div style='margin-bottom:8px;text-align:center;font-family:monospace;font-weight:700;'>"
+        f"phase={phase}</div>"
     )
+    return phase_html + "<table style='border-collapse:collapse;margin:0 auto;'>" + "".join(rows_html) + "</table>"

@@ -16,11 +16,11 @@ MOVE_TO_INDEX = {name: index for index, name in enumerate(MOVE_NAMES)}
 INDEX_TO_MOVE = {index: name for name, index in MOVE_TO_INDEX.items()}
 AGENT_NAMES = ("agent_a", "agent_b")
 ITEM_LABELS = ("LEFT", "RIGHT")
-ITEM_POSITIONS = {
+DEFAULT_ITEM_POSITIONS = {
     "LEFT": np.array([0, 1], dtype=np.int64),
     "RIGHT": np.array([0, 3], dtype=np.int64),
 }
-START_POSITIONS = {
+DEFAULT_START_POSITIONS = {
     "agent_a": np.array([4, 1], dtype=np.int64),
     "agent_b": np.array([4, 3], dtype=np.int64),
 }
@@ -84,23 +84,41 @@ def _normalize_glyph(glyph: Any) -> np.ndarray:
     raise TypeError("unsupported glyph payload")
 
 
+def manhattan_distance(position_a: np.ndarray, position_b: np.ndarray) -> int:
+    return int(np.abs(position_a - position_b).sum())
+
+
 class ScoreGParallelEnv(ParallelEnv):
     """Two-agent partially observed gridworld with glyph-based communication."""
 
     metadata = {"name": "scoreg_v0", "render_modes": ["human"], "is_parallelizable": True}
 
-    def __init__(self, grid_size: int = 5, max_steps: int = 10) -> None:
+    def __init__(
+        self,
+        grid_size: int = 5,
+        max_steps: int = 10,
+        comm_phase_steps: int = 0,
+        randomize_positions: bool = False,
+        hard_split_prob: float = 0.0,
+    ) -> None:
         if grid_size < 5:
             raise ValueError("grid_size must be at least 5")
+        if comm_phase_steps < 0:
+            raise ValueError("comm_phase_steps must be non-negative")
+        if not 0.0 <= hard_split_prob <= 1.0:
+            raise ValueError("hard_split_prob must be between 0.0 and 1.0")
         self.grid_size = grid_size
         self.max_steps = max_steps
+        self.comm_phase_steps = comm_phase_steps
+        self.randomize_positions = randomize_positions
+        self.hard_split_prob = hard_split_prob
         self.possible_agents = list(AGENT_NAMES)
         self.agents: list[str] = []
         self._rng = np.random.default_rng()
         self.agent_positions: dict[str, np.ndarray] = {}
         self.item_positions = {
-            "LEFT": ITEM_POSITIONS["LEFT"].copy(),
-            "RIGHT": ITEM_POSITIONS["RIGHT"].copy(),
+            "LEFT": DEFAULT_ITEM_POSITIONS["LEFT"].copy(),
+            "RIGHT": DEFAULT_ITEM_POSITIONS["RIGHT"].copy(),
         }
         self.left_value = 1
         self.right_value = 1
@@ -118,6 +136,7 @@ class ScoreGParallelEnv(ParallelEnv):
                 "private_value": spaces.Box(0, 9, shape=(2,), dtype=np.int64),
                 "other_last_glyph": spaces.MultiBinary((GLYPH_SIDE, GLYPH_SIDE)),
                 "step_count": spaces.Box(0, self.max_steps, shape=(1,), dtype=np.int64),
+                "movement_enabled": spaces.Box(0, 1, shape=(1,), dtype=np.int64),
             }
         )
 
@@ -136,13 +155,69 @@ class ScoreGParallelEnv(ParallelEnv):
             return "TIE"
         return "LEFT" if self.left_value > self.right_value else "RIGHT"
 
-    def reset(self, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[dict[str, dict[str, np.ndarray]], dict[str, dict[str, Any]]]:
+    @property
+    def movement_enabled(self) -> bool:
+        return self.step_count >= self.comm_phase_steps
+
+    @property
+    def current_phase(self) -> str:
+        return "move" if self.movement_enabled else "comm"
+
+    def _default_layout(self) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+        return (
+            {name: DEFAULT_START_POSITIONS[name].copy() for name in AGENT_NAMES},
+            {label: DEFAULT_ITEM_POSITIONS[label].copy() for label in ITEM_LABELS},
+        )
+
+    def _sample_layout(self) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+        coordinates = np.asarray(
+            [[row_index, col_index] for row_index in range(self.grid_size) for col_index in range(self.grid_size)],
+            dtype=np.int64,
+        )
+        for _ in range(256):
+            chosen_indices = self._rng.choice(len(coordinates), size=4, replace=False)
+            chosen_positions = coordinates[chosen_indices]
+            agent_positions = {
+                "agent_a": chosen_positions[0].copy(),
+                "agent_b": chosen_positions[1].copy(),
+            }
+            item_positions = {
+                "LEFT": chosen_positions[2].copy(),
+                "RIGHT": chosen_positions[3].copy(),
+            }
+            nearest_sum = sum(
+                min(
+                    manhattan_distance(agent_positions[agent_name], item_positions["LEFT"]),
+                    manhattan_distance(agent_positions[agent_name], item_positions["RIGHT"]),
+                )
+                for agent_name in AGENT_NAMES
+            )
+            if nearest_sum >= 4:
+                return agent_positions, item_positions
+        return self._default_layout()
+
+    def _sample_values(self) -> tuple[int, int]:
+        if float(self._rng.random()) < self.hard_split_prob:
+            low_value = int(self._rng.integers(1, 4))
+            high_value = int(self._rng.integers(7, 10))
+            if int(self._rng.integers(0, 2)) == 0:
+                return low_value, high_value
+            return high_value, low_value
+        return int(self._rng.integers(1, 10)), int(self._rng.integers(1, 10))
+
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, dict[str, np.ndarray]], dict[str, dict[str, Any]]]:
         del options
         self._rng = np.random.default_rng(seed)
         self.agents = self.possible_agents[:]
-        self.agent_positions = {name: START_POSITIONS[name].copy() for name in AGENT_NAMES}
-        self.left_value = int(self._rng.integers(1, 10))
-        self.right_value = int(self._rng.integers(1, 10))
+        if self.randomize_positions:
+            self.agent_positions, self.item_positions = self._sample_layout()
+        else:
+            self.agent_positions, self.item_positions = self._default_layout()
+        self.left_value, self.right_value = self._sample_values()
         self.step_count = 0
         self.last_outcome = "not_finished"
         self.last_glyphs = {agent: np.zeros((GLYPH_SIDE, GLYPH_SIDE), dtype=np.int8) for agent in AGENT_NAMES}
@@ -151,7 +226,8 @@ class ScoreGParallelEnv(ParallelEnv):
         return observations, infos
 
     def step(
-        self, actions: dict[str, dict[str, Any]]
+        self,
+        actions: dict[str, dict[str, Any]],
     ) -> tuple[
         dict[str, dict[str, np.ndarray]],
         dict[str, float],
@@ -167,6 +243,7 @@ class ScoreGParallelEnv(ParallelEnv):
         terminations = {agent: False for agent in current_agents}
         truncations = {agent: False for agent in current_agents}
         infos = {agent: {} for agent in current_agents}
+        movement_enabled = self.movement_enabled
 
         normalized_actions: dict[str, dict[str, Any]] = {}
         for agent in current_agents:
@@ -178,22 +255,24 @@ class ScoreGParallelEnv(ParallelEnv):
                 "glyph": _normalize_glyph(action["glyph"]),
             }
 
-        for agent, payload in normalized_actions.items():
-            move_name = payload["move"]
-            if move_name != "PICK":
-                delta = MOVE_DELTAS[move_name]
-                next_position = self.agent_positions[agent] + delta
-                self.agent_positions[agent] = np.clip(next_position, 0, self.grid_size - 1)
+        if movement_enabled:
+            for agent, payload in normalized_actions.items():
+                move_name = payload["move"]
+                if move_name != "PICK":
+                    delta = MOVE_DELTAS[move_name]
+                    next_position = self.agent_positions[agent] + delta
+                    self.agent_positions[agent] = np.clip(next_position, 0, self.grid_size - 1)
 
         picked_targets: dict[str, str] = {}
-        for agent, payload in normalized_actions.items():
-            move_name = payload["move"]
-            if move_name != "PICK":
-                continue
-            for item_label in ITEM_LABELS:
-                if np.array_equal(self.agent_positions[agent], self.item_positions[item_label]):
-                    picked_targets[agent] = item_label
-                    break
+        if movement_enabled:
+            for agent, payload in normalized_actions.items():
+                move_name = payload["move"]
+                if move_name != "PICK":
+                    continue
+                for item_label in ITEM_LABELS:
+                    if np.array_equal(self.agent_positions[agent], self.item_positions[item_label]):
+                        picked_targets[agent] = item_label
+                        break
 
         for agent, payload in normalized_actions.items():
             self.last_glyphs[agent] = payload["glyph"]
@@ -233,17 +312,16 @@ class ScoreGParallelEnv(ParallelEnv):
         return {
             "self_position": self.agent_positions[agent].copy(),
             "other_position": self.agent_positions[other_agent].copy(),
-            "item_positions": np.stack(
-                [self.item_positions["LEFT"], self.item_positions["RIGHT"]]
-            ).astype(np.int64),
+            "item_positions": np.stack([self.item_positions["LEFT"], self.item_positions["RIGHT"]]).astype(np.int64),
             "private_value": private_value,
             "other_last_glyph": self.last_glyphs[other_agent].copy(),
             "step_count": np.array([self.step_count], dtype=np.int64),
+            "movement_enabled": np.array([1 if self.movement_enabled else 0], dtype=np.int64),
         }
 
     def render(self) -> str:
         return (
-            f"step={self.step_count} "
+            f"phase={self.current_phase} step={self.step_count} "
             f"a={self.agent_positions['agent_a'].tolist()} "
             f"b={self.agent_positions['agent_b'].tolist()} "
             f"left={self.left_value} right={self.right_value}"

@@ -6,6 +6,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from analysis.glyph_metrics import compute_convention_hints as summarize_convention_hints
+from analysis.glyph_metrics import (
+    compute_glyph_reuse_consistency,
+    compute_glyph_target_association,
+    compute_target_flip_rate,
+)
+
 
 def load_manifest(manifest_path: str | Path) -> dict[str, Any]:
     path = Path(manifest_path)
@@ -135,6 +142,9 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "success_rate": 0.0,
             "average_reward": 0.0,
             "target_agreement_rate": 0.0,
+            "glyph_reuse_consistency": 0.0,
+            "glyph_target_association": 0.0,
+            "target_flip_rate": 0.0,
             "outcome_breakdown": {},
         }
     success_count = sum(1 for row in finals if row.get("outcome") == "high_value")
@@ -149,10 +159,43 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         outcome = str(row.get("outcome", "unknown"))
         breakdown[outcome] = breakdown.get(outcome, 0) + 1
     total = len(finals)
+    reuse = compute_glyph_reuse_consistency(rows)
+    association = compute_glyph_target_association(rows)
+    target_flip = compute_target_flip_rate(rows)
+    dominant_condition = str(finals[-1].get("condition", ""))
     return {
         "episodes": total,
         "success_rate": success_count / total,
         "average_reward": reward_total / total,
         "target_agreement_rate": agreement_count / total,
+        "glyph_reuse_consistency": float(reuse.get(dominant_condition, 0.0)),
+        "glyph_target_association": float(association.get(dominant_condition, 0.0)),
+        "target_flip_rate": float(target_flip.get(dominant_condition, 0.0)),
         "outcome_breakdown": breakdown,
     }
+
+
+def recent_glyph_history(
+    rows: list[dict[str, Any]],
+    *,
+    agent_name: str,
+    limit: int = 4,
+) -> list[list[str]]:
+    glyph_key = "glyph_a_sent" if agent_name == "agent_a" else "glyph_b_sent"
+    history = [row.get(glyph_key, []) for row in rows if row.get(glyph_key)]
+    return history[-limit:]
+
+
+def recent_received_history(
+    rows: list[dict[str, Any]],
+    *,
+    agent_name: str,
+    limit: int = 4,
+) -> list[list[str]]:
+    glyph_key = "glyph_a_received" if agent_name == "agent_a" else "glyph_b_received"
+    history = [row.get(glyph_key, []) for row in rows if row.get(glyph_key)]
+    return history[-limit:]
+
+
+def convention_hints(rows: list[dict[str, Any]], condition: str | None = None, limit: int = 5) -> list[dict[str, Any]]:
+    return summarize_convention_hints(rows, condition=condition, limit=limit)

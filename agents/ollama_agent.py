@@ -111,6 +111,8 @@ def build_agent_user_prompt(
     item_positions = observation["item_positions"].tolist()
     glyph_rows = glyph_matrix_to_rows(observation["other_last_glyph"])
     step_count = int(_as_int_list(observation["step_count"])[0])
+    movement_enabled = bool(_as_int_list(observation["movement_enabled"])[0])
+    phase_label = "move" if movement_enabled else "comm"
 
     if agent_name == "agent_a":
         known_label = f"left_item={private_value[0]}"
@@ -125,6 +127,8 @@ def build_agent_user_prompt(
         [
             "Public state:",
             f"- step={step_count}",
+            f"- phase={phase_label}",
+            f"- movement_enabled={int(movement_enabled)}",
             f"- self_position={self_position}",
             f"- other_position={other_position}",
             f"- left_item_position={item_positions[0]}",
@@ -141,10 +145,15 @@ def build_agent_user_prompt(
             "",
             "Decision policy:",
             "- Maximize team reward rather than playing passively.",
+            "- Glyphs are the only channel for communicating hidden value information.",
             "- Try to keep a LEFT or RIGHT hypothesis target on every turn.",
+            "- Reuse previously successful glyphs when the known value and coordination situation are similar.",
+            "- If your known value is low, consider converging on the partner side instead of stubbornly staying on your own side.",
+            "- Matching the partner's target matters more than acting alone.",
             "- Use UNKNOWN only at step 0 or when you truly cannot decide.",
             "- Use STAY only for a clear tactical reason, such as waiting on the target cell.",
             "- If your target is not reached yet, prefer moving toward it.",
+            "- During communication-only phase, use the glyph to make the target easier to infer later.",
             "",
             "Return JSON only. Follow this schema exactly:",
             schema_json,
@@ -166,6 +175,42 @@ def resolve_hypothesis_target(agent_name: str, previous_target: str | None) -> s
     if previous_target in {"LEFT", "RIGHT"}:
         return previous_target
     return default_target_for_agent(agent_name)
+
+
+def agent_known_value(agent_name: str, observation: dict[str, np.ndarray]) -> int:
+    private_value = _as_int_list(observation["private_value"])
+    return int(private_value[0] if agent_name == "agent_a" else private_value[1])
+
+
+def glyph_signature_from_rows(rows: list[str]) -> str:
+    return "".join(rows)
+
+
+def build_memory_summary(
+    *,
+    episode_id: int,
+    condition: str,
+    agent_name: str,
+    known_value: int,
+    sent_glyph_rows: list[str],
+    received_glyph_rows: list[str],
+    target: str,
+    agreement: bool,
+    team_reward: float,
+    outcome: str,
+) -> str:
+    return (
+        f"episode={episode_id} "
+        f"condition={condition} "
+        f"agent={agent_name} "
+        f"my_known_value={known_value} "
+        f"my_sent_glyph={glyph_signature_from_rows(sent_glyph_rows)} "
+        f"my_received_glyph={glyph_signature_from_rows(received_glyph_rows)} "
+        f"my_target={target} "
+        f"agreement={agreement} "
+        f"team_reward={team_reward:.2f} "
+        f"outcome={outcome}"
+    )
 
 
 def _target_position_from_observation(observation: dict[str, np.ndarray], target: str) -> np.ndarray:

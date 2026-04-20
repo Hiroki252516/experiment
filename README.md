@@ -1,6 +1,6 @@
 # ScoreG-style Local LLM Coordination Experiment
 
-このプロジェクトは、macOS Apple Silicon 上で Ollama を使い、2 体のローカル LLM エージェントが 5x5 gridworld で 7x7 binary glyph だけを使って高価値アイテムを共同回収できるかを試す最小実験基盤です。
+このプロジェクトは、macOS Apple Silicon 上で Ollama を使い、2 体の固定ローカル LLM エージェントが 5x5 gridworld で 7x7 binary glyph だけを使って高価値アイテムを共同回収できるかを試す実験基盤です。狙いは「強い意味体系の完成」ではなく、反復相互作用の中で **弱いが再利用される glyph 慣習の芽** が観察できる条件を作ることです。
 
 ## 前提
 
@@ -80,9 +80,19 @@ make analyze
 直接実行する場合:
 
 ```bash
-python scripts/run_experiment.py --episodes 10 --conditions comm silent random --model gemma3:1b
-python scripts/analyze_results.py --input logs/results.csv --figure logs/summary.png
+python scripts/run_experiment.py --episodes 50 --conditions comm silent random --model gemma3:1b --comm-phase-steps 2 --randomize-positions --hard-split-prob 0.5 --memory-budget 50
+python scripts/analyze_results.py --input logs/results.csv --trace-dir logs/traces --figure logs/summary.png
 ```
+
+推奨 run 設定:
+
+- smoke: `episodes=5`, `comm_phase_steps=2`, `randomize_positions=true`, `hard_split_prob=0.5`, `memory_budget=20`
+- convention run: `episodes=200`, `comm_phase_steps=2`, `randomize_positions=true`, `hard_split_prob=0.5`, `memory_budget=50`
+- deeper run: `episodes=500`, 同上
+
+`comm_phase_steps` は episode 冒頭の communication-only phase の長さです。この phase では移動せず、glyph だけを交換します。
+
+memory は各 agent に閉じた private memory で、成功した glyph と outcome の対応を簡潔なテキスト要約として残します。これは重み更新ではなく、固定 LLM 上の in-context 再利用です。
 
 ## Realtime Viewer
 
@@ -132,12 +142,13 @@ Replay の使い方:
 
 - `logs/results.csv`: episode 単位の要約
 - `logs/episodes.jsonl`: final raw output を含む詳細ログ
-- `logs/summary.png`: 条件別平均報酬、成功率、target agreement rate の図
+- `logs/summary.png`: 条件別平均報酬、成功率、target agreement rate、glyph 指標の図
 - `logs/traces/<run_id>.jsonl`: realtime viewer 用 step trace
 - `logs/runs/<run_id>/manifest.json`: run metadata
 
 `results.csv` には最低限次を保存します。
 
+- `run_id`
 - `seed`
 - `condition`
 - `episode_id`
@@ -148,6 +159,13 @@ Replay の使い方:
 - `team_reward`
 - `target_a`
 - `target_b`
+
+追加の glyph 指標:
+
+- `glyph reuse consistency`: 同じ known value / target 付近で同じ glyph をどれくらい再利用しているか
+- `glyph-target association`: 特定 glyph が LEFT/RIGHT とどれくらい結びついているか
+- `target flip rate`: episode 内で initial target から final target がどれくらい変わったか
+- `communication gain`: `comm` が `silent/random` ベースラインよりどれだけ改善したか
 
 ## よくある失敗
 
@@ -173,4 +191,4 @@ Replay の使い方:
   対象 run の trace が空、または選択した condition / episode に該当フレームがありません。
 
 - `comm` が `silent` を上回らない  
-  小型モデルでは自然に有意味な glyph 協調が出ない場合があります。まずはログを見て、モデルサイズや prompt の見直しを検討してください。
+  小型モデルでは自然に有意味な glyph 協調が出ない場合があります。まずは `comm_phase_steps`、`hard_split_prob`、memory budget、モデルサイズを見直してください。強い創発言語は保証しません。
