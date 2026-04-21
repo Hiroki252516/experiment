@@ -52,6 +52,12 @@ def test_trace_row_has_required_keys() -> None:
         "glyph_a_changed",
         "glyph_b_changed",
         "glyph_event",
+        "glyph_a_zero",
+        "glyph_b_zero",
+        "glyph_a_delta_pixels",
+        "glyph_b_delta_pixels",
+        "glyph_a_same_streak",
+        "glyph_b_same_streak",
         "glyph_exchange_label",
         "move_a",
         "move_b",
@@ -83,6 +89,9 @@ def test_trace_row_has_required_keys() -> None:
     assert row["outcome"] == "max_steps"
     assert row["guard_b_reason"] == "stay_to_greedy_move"
     assert row["glyph_event"] is False
+    assert row["glyph_a_zero"] is True
+    assert row["glyph_a_delta_pixels"] == 0
+    assert row["glyph_a_same_streak"] == 1
 
 
 def test_manifest_has_required_keys() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import streamlit as st
@@ -31,6 +32,7 @@ from viewer.data import (
     load_trace_rows,
     load_trace_tail_state,
     manifest_status_message,
+    previous_episode_row,
 )
 from viewer.render import build_grid_html, glyph_rows_text, glyph_rows_to_array
 from viewer.utils import (
@@ -44,6 +46,8 @@ from viewer.utils import (
 
 RUNS_DIR = PROJECT_ROOT / "logs" / "runs"
 ZERO_GLYPH_ROWS = ["0" * 7 for _ in range(7)]
+ANIMATION_INTERVAL_S = 0.4
+ANIMATION_TOTAL_S = 1.2
 
 
 def selected_manifest(manifests: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -65,6 +69,38 @@ def render_header(manifest: dict[str, Any] | None) -> None:
     model = manifest.get("model", "-") if manifest else "-"
     st.title("ScoreG Realtime Viewer")
     st.caption(f"mode={st.session_state.mode} | run_id={run_id} | model={model}")
+
+
+def animation_key_for_frame(frame: dict[str, Any]) -> str:
+    return ":".join(
+        [
+            str(frame.get("run_id", "")),
+            str(frame.get("condition", "")),
+            str(frame.get("episode", "")),
+            str(frame.get("step", "")),
+            str(frame.get("glyph_a_hash", "")),
+            str(frame.get("glyph_b_hash", "")),
+        ]
+    )
+
+
+def current_animation_mode(frame: dict[str, Any]) -> str:
+    if not frame:
+        return "current"
+    key = animation_key_for_frame(frame)
+    now = monotonic()
+    if st.session_state.glyph_animation_key != key:
+        st.session_state.glyph_animation_key = key
+        st.session_state.glyph_animation_started_at = now
+        return "previous" if bool(frame.get("glyph_event", False)) else "current"
+    if not bool(frame.get("glyph_event", False)):
+        return "current"
+    elapsed = now - float(st.session_state.glyph_animation_started_at or 0.0)
+    if elapsed < ANIMATION_INTERVAL_S:
+        return "previous"
+    if elapsed < ANIMATION_INTERVAL_S * 2:
+        return "diff"
+    return "current"
 
 
 def render_launch_status(manifest: dict[str, Any] | None) -> None:
@@ -173,15 +209,45 @@ def render_glyph_card(
     subtitle: str = "",
     detail_lines: list[str] | None = None,
     show_rows: bool = False,
+    mode: str = "current",
+    previous_rows: list[str] | None = None,
+    badges: list[str] | None = None,
 ) -> None:
     st.caption(title)
-    st.image(glyph_rows_to_array(rows, scale=20 if width >= 220 else 10, role=role), width=width, clamp=True)
+    if badges:
+        st.caption(" | ".join(badges))
+    st.image(
+        glyph_rows_to_array(
+            rows,
+            scale=20 if width >= 220 else 10,
+            role=role,
+            mode=mode,
+            previous_rows=previous_rows,
+        ),
+        width=width,
+        clamp=True,
+    )
     if subtitle:
         st.caption(subtitle)
     for line in detail_lines or []:
         st.caption(line)
     if show_rows:
         st.code(glyph_rows_text(rows), language="text")
+
+
+def glyph_badges(frame: dict[str, Any], suffix: str) -> list[str]:
+    badges: list[str] = []
+    if bool(frame.get(f"glyph_{suffix}_zero", False)):
+        badges.append("zero glyph")
+    if bool(frame.get(f"glyph_{suffix}_reused_from_success", False)):
+        badges.append("reused success")
+    if bool(frame.get(f"glyph_{suffix}_changed", False)):
+        badges.append("glyph event")
+    same_streak = int(frame.get(f"glyph_{suffix}_same_streak", 1))
+    delta_pixels = int(frame.get(f"glyph_{suffix}_delta_pixels", 0))
+    badges.append(f"delta={delta_pixels}")
+    badges.append(f"same x{same_streak}")
+    return badges
 
 
 def render_target_switches(frame: dict[str, Any]) -> None:
@@ -195,9 +261,11 @@ def render_target_switches(frame: dict[str, Any]) -> None:
             st.warning(switch)
 
 
-def render_glyph_theater(frame: dict[str, Any]) -> None:
+def render_glyph_theater(frame: dict[str, Any], previous_frame: dict[str, Any] | None) -> None:
     st.subheader("Glyph Theater")
     phase = str(frame.get("phase", "act"))
+    animation_mode = current_animation_mode(frame)
+    previous_frame = previous_frame or {}
     left, right = st.columns(2)
     with left:
         render_glyph_card(
@@ -211,6 +279,9 @@ def render_glyph_theater(frame: dict[str, Any]) -> None:
                 f"target={target_transition(frame, 'agent_a')}",
                 f"guard={frame.get('guard_a_reason', '') or 'none'}",
             ],
+            mode=animation_mode,
+            previous_rows=previous_frame.get("glyph_a_sent"),
+            badges=glyph_badges(frame, "a"),
         )
     with right:
         render_glyph_card(
@@ -224,6 +295,9 @@ def render_glyph_theater(frame: dict[str, Any]) -> None:
                 f"target={target_transition(frame, 'agent_b')}",
                 f"outcome={frame.get('outcome', '-')}",
             ],
+            mode=animation_mode,
+            previous_rows=previous_frame.get("glyph_b_received"),
+            badges=glyph_badges(frame, "a"),
         )
     left, right = st.columns(2)
     with left:
@@ -238,6 +312,9 @@ def render_glyph_theater(frame: dict[str, Any]) -> None:
                 f"target={target_transition(frame, 'agent_b')}",
                 f"reused_success={bool(frame.get('glyph_b_reused_from_success', False))}",
             ],
+            mode=animation_mode,
+            previous_rows=previous_frame.get("glyph_b_sent"),
+            badges=glyph_badges(frame, "b"),
         )
     with right:
         render_glyph_card(
@@ -251,6 +328,9 @@ def render_glyph_theater(frame: dict[str, Any]) -> None:
                 f"target={target_transition(frame, 'agent_a')}",
                 f"reused_success={bool(frame.get('glyph_a_reused_from_success', False))}",
             ],
+            mode=animation_mode,
+            previous_rows=previous_frame.get("glyph_a_received"),
+            badges=glyph_badges(frame, "b"),
         )
     render_target_switches(frame)
 
@@ -272,10 +352,16 @@ def render_glyph_history_strip(rows: list[dict[str, Any]], frame: dict[str, Any]
             st.caption(label)
             if history_row.get("glyph_event"):
                 st.caption("glyph event")
+            st.caption(
+                f"A delta={int(history_row.get('glyph_a_delta_pixels', 0))} | same x{int(history_row.get('glyph_a_same_streak', 1))}"
+            )
             st.image(
                 glyph_rows_to_array(history_row.get("glyph_a_sent", ZERO_GLYPH_ROWS), scale=8, role="a_sent"),
                 width=88,
                 clamp=True,
+            )
+            st.caption(
+                f"B delta={int(history_row.get('glyph_b_delta_pixels', 0))} | same x{int(history_row.get('glyph_b_same_streak', 1))}"
             )
             st.image(
                 glyph_rows_to_array(history_row.get("glyph_b_sent", ZERO_GLYPH_ROWS), scale=8, role="b_sent"),
@@ -284,6 +370,8 @@ def render_glyph_history_strip(rows: list[dict[str, Any]], frame: dict[str, Any]
             )
             st.caption(f"A {history_row.get('target_a_after', history_row.get('target_a', '-'))}")
             st.caption(f"B {history_row.get('target_b_after', history_row.get('target_b', '-'))}")
+            if bool(history_row.get("glyph_a_zero", False)) and bool(history_row.get("glyph_b_zero", False)):
+                st.caption("all-zero exchange")
 
 
 def render_communication_timeline(rows: list[dict[str, Any]]) -> None:
@@ -348,6 +436,9 @@ def render_agent_panel(agent_name: str, frame: dict[str, Any]) -> None:
             "private_value": private_value,
             "glyph_reused_from_success": bool(frame.get(f"glyph_{suffix}_reused_from_success", False)),
             "glyph_changed": bool(frame.get(f"glyph_{suffix}_changed", False)),
+            "glyph_zero": bool(frame.get(f"glyph_{suffix}_zero", False)),
+            "glyph_delta_pixels": int(frame.get(f"glyph_{suffix}_delta_pixels", 0)),
+            "glyph_same_streak": int(frame.get(f"glyph_{suffix}_same_streak", 1)),
             "guard_applied": bool(frame.get(f"guard_{suffix}_applied", False)),
             "guard_reason": frame.get(f"guard_{suffix}_reason", "") or "",
             "error": frame.get("error_message", ""),
@@ -416,8 +507,19 @@ def render_convention_hints(rows: list[dict[str, Any]]) -> None:
                 )
 
 
+def render_run_notes(frame: dict[str, Any]) -> None:
+    condition = str(frame.get("condition", ""))
+    both_zero = bool(frame.get("glyph_a_zero", False)) and bool(frame.get("glyph_b_zero", False))
+    if condition == "silent":
+        st.info("silent condition: all-zero glyph is expected and intentional.")
+    elif condition == "comm" and both_zero:
+        st.warning("comm condition is currently showing zero-signal collapse: both agents emitted all-zero glyphs.")
+
+
 def render_main_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manifest: dict[str, Any] | None) -> None:
-    render_glyph_theater(frame)
+    previous_frame = previous_episode_row(rows, int(frame.get("step", 0)))
+    render_glyph_theater(frame, previous_frame)
+    render_run_notes(frame)
     render_glyph_history_strip(rows, frame)
     render_communication_timeline(rows)
 
@@ -434,7 +536,7 @@ def render_main_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manife
 
 
 def render_live_section() -> None:
-    @st.fragment(run_every="1s")
+    @st.fragment(run_every="400ms")
     def live_fragment() -> None:
         manifests = list_run_manifests(RUNS_DIR)
         sync_selected_run(manifests)
@@ -475,21 +577,25 @@ def render_live_section() -> None:
 
 
 def render_replay_section(manifest: dict[str, Any] | None, rows: list[dict[str, Any]]) -> None:
-    filtered = filter_rows(
-        rows,
-        condition=st.session_state.selected_condition or None,
-        episode=st.session_state.selected_episode,
-    )
-    if not filtered:
-        if manifest:
-            st.info(manifest_status_message(manifest))
-        else:
-            st.info("No replay frames available for the selected run and episode.")
-        return
-    step_map = {int(row.get("step", 0)): row for row in filtered}
-    frame = step_map.get(st.session_state.selected_step, filtered[-1])
-    render_main_panels(frame, filtered, manifest)
-    render_launch_status(manifest)
+    @st.fragment(run_every="400ms")
+    def replay_fragment() -> None:
+        filtered = filter_rows(
+            rows,
+            condition=st.session_state.selected_condition or None,
+            episode=st.session_state.selected_episode,
+        )
+        if not filtered:
+            if manifest:
+                st.info(manifest_status_message(manifest))
+            else:
+                st.info("No replay frames available for the selected run and episode.")
+            return
+        step_map = {int(row.get("step", 0)): row for row in filtered}
+        frame = step_map.get(st.session_state.selected_step, filtered[-1])
+        render_main_panels(frame, filtered, manifest)
+        render_launch_status(manifest)
+
+    replay_fragment()
 
 
 def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, Any]]) -> None:

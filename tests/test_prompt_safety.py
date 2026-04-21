@@ -37,6 +37,12 @@ def test_agent_a_prompt_does_not_include_right_value() -> None:
     assert "phase=comm_only" in prompt
     assert "glyph is the only channel for hidden information" in prompt
     assert "reuse a glyph that worked in a similar situation" in prompt
+    assert "avoid an all-zero glyph unless you intentionally mean no-signal" in prompt
+    assert "change only a few pixels instead of rewriting the whole 7x7 pattern" in prompt
+    assert "last_sent_glyph=" in prompt
+    assert "same_glyph_streak=" in prompt
+    assert "glyph_was_all_zero_last_turn=" in prompt
+    assert "comm_round_index=" in prompt
 
 
 def test_agent_b_prompt_does_not_include_left_value() -> None:
@@ -52,3 +58,4 @@ def test_agent_b_prompt_does_not_include_left_value() -> None:
     assert "Maximize team reward" in prompt
     assert "current_hypothesis_target=RIGHT" in prompt
     assert "phase=comm_only" in prompt
+    assert "avoid an all-zero glyph unless you intentionally mean no-signal" in prompt

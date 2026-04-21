@@ -37,8 +37,27 @@ def normalize_glyph_rows(rows: list[str] | Any) -> list[str]:
     return normalized
 
 
-def glyph_rows_to_array(rows: list[str], scale: int = 16, role: str = "hint") -> np.ndarray:
+def _glyph_mask(rows: list[str] | Any) -> np.ndarray:
     glyph_rows = normalize_glyph_rows(rows)
+    return np.asarray([[1 if bit == "1" else 0 for bit in row] for row in glyph_rows], dtype=np.uint8)
+
+
+def _lighten(color: np.ndarray, amount: float) -> np.ndarray:
+    return np.clip(color + (255 - color) * amount, 0, 255).astype(np.uint8)
+
+
+def glyph_rows_to_array(
+    rows: list[str],
+    scale: int = 16,
+    role: str = "hint",
+    *,
+    mode: str = "current",
+    previous_rows: list[str] | None = None,
+) -> np.ndarray:
+    glyph_rows = normalize_glyph_rows(rows)
+    current_mask = _glyph_mask(glyph_rows)
+    previous_mask = _glyph_mask(previous_rows) if previous_rows is not None else np.zeros_like(current_mask)
+    changed_mask = current_mask != previous_mask
     style = GLYPH_STYLES.get(role, GLYPH_STYLES["hint"])
     cell_size = max(6, int(scale))
     line_size = max(1, cell_size // 6)
@@ -54,11 +73,24 @@ def glyph_rows_to_array(rows: list[str], scale: int = 16, role: str = "hint") ->
 
     on_color = np.asarray(style["on"], dtype=np.uint8)
     off_color = np.asarray(style["off"], dtype=np.uint8)
-    for row_index, row in enumerate(glyph_rows):
-        for col_index, bit in enumerate(row):
+    ghost_on = _lighten(on_color, 0.55)
+    muted_off = _lighten(off_color, 0.12)
+    diff_on = on_color
+    diff_off = _lighten(off_color, 0.35)
+    for row_index in range(GLYPH_SIDE):
+        for col_index in range(GLYPH_SIDE):
             top = inner_top + line_size + row_index * (cell_size + line_size)
             left = inner_left + line_size + col_index * (cell_size + line_size)
-            canvas[top : top + cell_size, left : left + cell_size] = on_color if bit == "1" else off_color
+            if mode == "previous":
+                color = ghost_on if previous_mask[row_index, col_index] else muted_off
+            elif mode == "diff":
+                if changed_mask[row_index, col_index]:
+                    color = diff_on if current_mask[row_index, col_index] else np.asarray(style["border"], dtype=np.uint8)
+                else:
+                    color = diff_off
+            else:
+                color = on_color if current_mask[row_index, col_index] else off_color
+            canvas[top : top + cell_size, left : left + cell_size] = color
     return canvas
 
 

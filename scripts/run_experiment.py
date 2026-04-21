@@ -222,6 +222,21 @@ def glyph_exchange_label(*, changed_a: bool, changed_b: bool) -> str:
     return f"{a_label}, {b_label}"
 
 
+def glyph_is_zero(glyph_rows: list[str]) -> bool:
+    return all(set(str(row)) <= {"0"} for row in glyph_rows)
+
+
+def glyph_delta_pixels(current_rows: list[str], previous_rows: list[str] | None) -> int:
+    if not previous_rows:
+        return 0
+    return sum(
+        1
+        for current_row, previous_row in zip(current_rows, previous_rows, strict=True)
+        for current_bit, previous_bit in zip(current_row, previous_row, strict=True)
+        if current_bit != previous_bit
+    )
+
+
 def choose_condition_glyph(
     condition: str,
     generated_rows: list[str],
@@ -265,12 +280,14 @@ def build_trace_row(
     act_step: int | None = None,
     comm_only_turns: int | None = None,
     previous_sent_rows: dict[str, list[str]] | None = None,
+    previous_same_streaks: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     target_before = target_before or dict(targets)
     target_after = target_after or dict(targets)
     target_changed = target_changed or {agent: False for agent in AGENT_NAMES}
     glyph_reused_from_success = glyph_reused_from_success or {agent: False for agent in AGENT_NAMES}
     previous_sent_rows = previous_sent_rows or {agent: [] for agent in AGENT_NAMES}
+    previous_same_streaks = previous_same_streaks or {agent: 0 for agent in AGENT_NAMES}
     current_phase = phase or getattr(env, "phase", "act")
     current_phase_turn = phase_turn_index if phase_turn_index is not None else int(getattr(env, "phase_turn_index", 0))
     current_act_step = act_step if act_step is not None else int(getattr(env, "act_step_count", step))
@@ -285,6 +302,18 @@ def build_trace_row(
     glyph_b_received_hash = glyph_rows_hash(received_rows["agent_b"])
     glyph_a_changed = bool(previous_sent_rows.get("agent_a")) and sent_rows["agent_a"] != previous_sent_rows["agent_a"]
     glyph_b_changed = bool(previous_sent_rows.get("agent_b")) and sent_rows["agent_b"] != previous_sent_rows["agent_b"]
+    glyph_a_delta = glyph_delta_pixels(sent_rows["agent_a"], previous_sent_rows.get("agent_a"))
+    glyph_b_delta = glyph_delta_pixels(sent_rows["agent_b"], previous_sent_rows.get("agent_b"))
+    glyph_a_same_streak = (
+        previous_same_streaks.get("agent_a", 0) + 1
+        if previous_sent_rows.get("agent_a") and sent_rows["agent_a"] == previous_sent_rows["agent_a"]
+        else 1
+    )
+    glyph_b_same_streak = (
+        previous_same_streaks.get("agent_b", 0) + 1
+        if previous_sent_rows.get("agent_b") and sent_rows["agent_b"] == previous_sent_rows["agent_b"]
+        else 1
+    )
     row = {
         "run_id": run_id,
         "timestamp": utc_now_iso(),
@@ -313,6 +342,12 @@ def build_trace_row(
         "glyph_a_changed": bool(glyph_a_changed),
         "glyph_b_changed": bool(glyph_b_changed),
         "glyph_event": bool(glyph_a_changed or glyph_b_changed),
+        "glyph_a_zero": bool(glyph_is_zero(sent_rows["agent_a"])),
+        "glyph_b_zero": bool(glyph_is_zero(sent_rows["agent_b"])),
+        "glyph_a_delta_pixels": int(glyph_a_delta),
+        "glyph_b_delta_pixels": int(glyph_b_delta),
+        "glyph_a_same_streak": int(glyph_a_same_streak),
+        "glyph_b_same_streak": int(glyph_b_same_streak),
         "glyph_exchange_label": glyph_exchange_label(
             changed_a=bool(glyph_a_changed),
             changed_b=bool(glyph_b_changed),
@@ -414,6 +449,7 @@ def initialize_condition_agents(args: argparse.Namespace, condition: str) -> dic
             system_prompt_path=prompt_map[agent_name],
             base_url=args.base_url,
             timeout_s=float(args.agent_timeout),
+            experiment_condition=condition,
         )
         for agent_name in AGENT_NAMES
     }
@@ -450,6 +486,7 @@ def run_episode(
     last_comm_sent_rows = {agent: list(ZERO_GLYPH_ROWS) for agent in AGENT_NAMES}
     last_comm_received_rows = {agent: list(ZERO_GLYPH_ROWS) for agent in AGENT_NAMES}
     previous_step_sent_rows = {agent: [] for agent in AGENT_NAMES}
+    previous_same_streaks = {agent: 0 for agent in AGENT_NAMES}
 
     while True:
         phase = phase_name_from_observation(observations["agent_a"])
@@ -541,6 +578,7 @@ def run_episode(
                 act_step=act_step,
                 comm_only_turns=args.comm_only_turns,
                 previous_sent_rows=previous_step_sent_rows,
+                previous_same_streaks=previous_same_streaks,
             )
             append_jsonl(trace_path, row)
             manifest["last_step"] = step_index
@@ -606,9 +644,14 @@ def run_episode(
             act_step=act_step,
             comm_only_turns=args.comm_only_turns,
             previous_sent_rows=previous_step_sent_rows,
+            previous_same_streaks=previous_same_streaks,
         )
         append_jsonl(trace_path, row)
         previous_step_sent_rows = {agent: list(sent_rows[agent]) for agent in AGENT_NAMES}
+        previous_same_streaks = {
+            "agent_a": int(row["glyph_a_same_streak"]),
+            "agent_b": int(row["glyph_b_same_streak"]),
+        }
 
         manifest["last_step"] = step_index
         manifest["current_phase"] = env.phase

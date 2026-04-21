@@ -24,6 +24,8 @@ DEFAULT_STATE: dict[str, Any] = {
     "launch_output_tail": "",
     "last_playback_tick": 0.0,
     "trace_offsets": {},
+    "glyph_animation_key": "",
+    "glyph_animation_started_at": 0.0,
 }
 
 
@@ -55,6 +57,8 @@ def reset_run_filters() -> None:
     st.session_state.selected_step = 0
     st.session_state.playing = False
     st.session_state.last_playback_tick = 0.0
+    st.session_state.glyph_animation_key = ""
+    st.session_state.glyph_animation_started_at = 0.0
 
 
 def resolve_option_index(options: list[Any], value: Any, default: int = 0) -> int:

@@ -67,6 +67,24 @@ def _glyph_exchange_label(changed_a: bool, changed_b: bool) -> str:
     return f"{left}, {right}"
 
 
+def glyph_is_zero(glyph_rows: Any) -> bool:
+    rows = coerce_glyph_rows(glyph_rows)
+    return all(set(row) <= {"0"} for row in rows)
+
+
+def glyph_delta_pixels(current_rows: Any, previous_rows: Any) -> int:
+    current = coerce_glyph_rows(current_rows)
+    previous = coerce_glyph_rows(previous_rows)
+    if not previous_rows:
+        return 0
+    return sum(
+        1
+        for current_row, previous_row in zip(current, previous, strict=True)
+        for current_bit, previous_bit in zip(current_row, previous_row, strict=True)
+        if current_bit != previous_bit
+    )
+
+
 def augment_trace_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     previous_sent_by_episode: dict[tuple[str, int], dict[str, list[str]]] = {}
     enriched_rows: list[dict[str, Any]] = []
@@ -92,6 +110,18 @@ def augment_trace_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         enriched.setdefault("glyph_a_changed", default_changed)
         default_changed = False if previous is None else sent_b != previous["agent_b"]
         enriched.setdefault("glyph_b_changed", default_changed)
+        enriched.setdefault("glyph_a_zero", glyph_is_zero(sent_a))
+        enriched.setdefault("glyph_b_zero", glyph_is_zero(sent_b))
+        enriched.setdefault("glyph_a_delta_pixels", glyph_delta_pixels(sent_a, previous["agent_a"] if previous else None))
+        enriched.setdefault("glyph_b_delta_pixels", glyph_delta_pixels(sent_b, previous["agent_b"] if previous else None))
+        enriched.setdefault(
+            "glyph_a_same_streak",
+            previous["agent_a_same_streak"] + 1 if previous is not None and sent_a == previous["agent_a"] else 1,
+        )
+        enriched.setdefault(
+            "glyph_b_same_streak",
+            previous["agent_b_same_streak"] + 1 if previous is not None and sent_b == previous["agent_b"] else 1,
+        )
         enriched.setdefault(
             "glyph_event",
             bool(enriched.get("glyph_a_changed", False) or enriched.get("glyph_b_changed", False)),
@@ -104,7 +134,12 @@ def augment_trace_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ),
         )
 
-        previous_sent_by_episode[context] = {"agent_a": sent_a, "agent_b": sent_b}
+        previous_sent_by_episode[context] = {
+            "agent_a": sent_a,
+            "agent_b": sent_b,
+            "agent_a_same_streak": int(enriched.get("glyph_a_same_streak", 1)),
+            "agent_b_same_streak": int(enriched.get("glyph_b_same_streak", 1)),
+        }
         enriched_rows.append(enriched)
     return enriched_rows
 
@@ -217,6 +252,16 @@ def glyph_history_rows(rows: list[dict[str, Any]], current_step: int, limit: int
             break
     start_index = max(0, target_index - max(limit - 1, 0))
     return rows[start_index : target_index + 1]
+
+
+def previous_episode_row(rows: list[dict[str, Any]], current_step: int) -> dict[str, Any] | None:
+    previous: dict[str, Any] | None = None
+    for row in rows:
+        step = int(row.get("step", 0))
+        if step >= int(current_step):
+            break
+        previous = row
+    return previous
 
 
 def adjacent_glyph_event_step(rows: list[dict[str, Any]], current_step: int, direction: int) -> int | None:

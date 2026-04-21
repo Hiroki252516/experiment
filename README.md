@@ -119,8 +119,8 @@ viewer には次の 3 モードがあります。
 
 glyph-first UI では次を上から順に表示します。
 
-- `Glyph Theater`: `agent_a sent / agent_b received / agent_b sent / agent_a received` を大きく並列表示
-- `Glyph History Strip`: 直近 8 step の送信 glyph を film strip 風に表示
+- `Glyph Theater`: `agent_a sent / agent_b received / agent_b sent / agent_a received` を大きく並列表示し、step 間は `previous -> diff -> current` の疑似アニメで差分を強調
+- `Glyph History Strip`: 直近 8 step の送信 glyph を film strip 風に表示し、`delta_pixels` と `same glyph xN` を確認
 - `Communication Timeline`: glyph 変化、target switch、move、outcome の関係を時系列表示
 - `Gridworld / Agent Detail / Convention Hints`: glyph の因果を見る補助表示
 
@@ -130,6 +130,7 @@ viewer では以下も確認できます。
 - target の before / after と changed flag
 - guard による補正の有無
 - `Prev glyph event` / `Next glyph event` による replay ジャンプ
+- `zero-signal collapse` の警告
 - 最近の successful glyph と same-context glyph consistency
 
 GUI から起動した run は `logs/traces/<run_id>.jsonl` と `logs/runs/<run_id>/manifest.json` を出力し、viewer はそれを監視します。
@@ -150,6 +151,7 @@ Replay の使い方:
 4. `Condition`, `Episode`, `Step` を選ぶ
 5. `Play/Pause`, `Prev`, `Next` で確認する
 6. glyph の変化点だけを追いたい場合は `Prev glyph event`, `Next glyph event` を使う
+7. Glyph Theater は `previous -> diff -> current` の疑似アニメで 7x7 ピクセル差分を強調する
 
 ## 結果の見方
 
@@ -181,6 +183,9 @@ step trace には以下も入ります。
 - `glyph_a_hash`, `glyph_b_hash`
 - `glyph_a_received_hash`, `glyph_b_received_hash`
 - `glyph_a_changed`, `glyph_b_changed`, `glyph_event`, `glyph_exchange_label`
+- `glyph_a_zero`, `glyph_b_zero`
+- `glyph_a_delta_pixels`, `glyph_b_delta_pixels`
+- `glyph_a_same_streak`, `glyph_b_same_streak`
 
 ## よくある失敗
 
@@ -206,4 +211,7 @@ step trace には以下も入ります。
   対象 run の trace が空、または選択した condition / episode に該当フレームがありません。
 
 - `comm` が `silent` を上回らない  
-  小型モデルでは自然に有意味な glyph 協調が出ない場合があります。`comm_only` phase を含む replay、recent successful glyph、protocol metrics を見て、glyph reuse や target update の兆候を確認してください。
+  小型モデルでは自然に有意味な glyph 協調が出ない場合があります。`comm_only` phase を含む replay、recent successful glyph、protocol metrics を見て、glyph reuse や target update の兆候を確認してください。viewer に `zero-signal collapse` が出ている場合は、`comm` でも実際には all-zero glyph に崩壊しています。
+
+- `silent` が空白に見える  
+  `silent` は意図的に全ゼログリフです。viewer では格子線と `zero glyph` バッジで表示され、異常ではありません。

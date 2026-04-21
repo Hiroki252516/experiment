@@ -53,6 +53,9 @@ def test_trace_jsonl_loading_and_filtering(tmp_path: Path) -> None:
     assert len(filter_rows(loaded, condition="comm", episode=0)) == 2
     assert loaded[1]["glyph_a_changed"] is True
     assert loaded[1]["glyph_event"] is True
+    assert loaded[0]["glyph_a_zero"] is True
+    assert loaded[1]["glyph_a_delta_pixels"] == 49
+    assert loaded[1]["glyph_b_same_streak"] == 2
 
 
 def test_partial_tail_is_tolerant(tmp_path: Path) -> None:
@@ -149,3 +152,16 @@ def test_glyph_history_and_event_navigation() -> None:
     assert [row["step"] for row in history] == [1, 2, 3]
     assert adjacent_glyph_event_step(rows, current_step=2, direction=-1) == 1
     assert adjacent_glyph_event_step(rows, current_step=1, direction=1) == 3
+
+
+def test_augmented_trace_computes_zero_and_same_streak(tmp_path: Path) -> None:
+    trace_path = tmp_path / "trace_augmented_test.jsonl"
+    trace_rows = [
+        {"condition": "comm", "episode": 0, "step": 0, "glyph_a_sent": ["0000000"] * 7, "glyph_b_sent": ["1010000"] * 7},
+        {"condition": "comm", "episode": 0, "step": 1, "glyph_a_sent": ["0000000"] * 7, "glyph_b_sent": ["1010000"] * 7},
+    ]
+    trace_path.write_text("\n".join(json.dumps(row) for row in trace_rows) + "\n", encoding="utf-8")
+    loaded = load_trace_rows(trace_path)
+    assert loaded[0]["glyph_a_zero"] is True
+    assert loaded[1]["glyph_a_same_streak"] == 2
+    assert loaded[1]["glyph_b_delta_pixels"] == 0

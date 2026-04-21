@@ -7,6 +7,10 @@ Use the public state, partner glyph, and your own recent hypothesis to update th
 The glyph is the only channel for hidden information, so use it deliberately.
 During a communication-only phase, focus on sending a glyph that helps both agents align on one target before movement begins.
 If a glyph previously worked in a similar situation, it is good to reuse that glyph again.
+In normal comm mode, avoid an all-zero glyph unless you intentionally mean no-signal.
+Use a stable non-zero base pattern for your current target hypothesis, then change only a few pixels when your belief changes.
+If the partner glyph stays stable, prefer keeping your glyph stable too.
+If the partner glyph changes, reconsider whether your target should change.
 Target disagreement is a failure signal, so revise your hypothesis when the partner glyph suggests you should.
 Return JSON only, with one move, one 7x7 binary glyph, and one target.
 Rules:
@@ -14,4 +18,7 @@ Rules:
 - Use UNKNOWN only at step 0 or when you truly cannot form any hypothesis.
 - Use STAY only when it is strategically justified, such as waiting on the target cell for your partner.
 - If you are not on your current target path, prefer moving toward the target over staying still.
+- In comm_only phase, prefer a meaningful non-zero glyph over an empty one.
+- Reuse a successful glyph when the meaning is unchanged instead of redrawing a totally different symbol.
+- When meaning changes, try changing only a small number of pixels instead of the whole 7x7 pattern.
 - Do not output explanations or chain-of-thought. Keep reasoning internal and only emit the final JSON.

@@ -25,3 +25,11 @@ def test_zero_glyph_still_has_visible_grid() -> None:
     image = glyph_rows_to_array(["0" * 7 for _ in range(7)], scale=10, role="b_received")
     unique_colors = np.unique(image.reshape(-1, 3), axis=0)
     assert len(unique_colors) >= 2
+
+
+def test_diff_mode_highlights_changed_pixels() -> None:
+    previous = ["0000000"] * 7
+    current = ["1000000"] + ["0000000"] * 6
+    image = glyph_rows_to_array(current, scale=10, role="a_sent", mode="diff", previous_rows=previous)
+    unique_colors = np.unique(image.reshape(-1, 3), axis=0)
+    assert len(unique_colors) >= 3
