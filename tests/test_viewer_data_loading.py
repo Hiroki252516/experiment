@@ -4,6 +4,8 @@ from pathlib import Path
 from viewer.data import (
     available_conditions,
     available_episodes,
+    build_convention_hints,
+    compute_protocol_metrics,
     filter_rows,
     list_run_manifests,
     load_trace_rows,
@@ -16,9 +18,9 @@ from viewer.data import (
 def test_trace_jsonl_loading_and_filtering(tmp_path: Path) -> None:
     trace_path = tmp_path / "trace.jsonl"
     rows = [
-        {"condition": "comm", "episode": 0, "step": 0, "done": False},
-        {"condition": "comm", "episode": 0, "step": 1, "done": True},
-        {"condition": "silent", "episode": 1, "step": 0, "done": True},
+        {"condition": "comm", "episode": 0, "step": 0, "phase": "comm_only", "done": False},
+        {"condition": "comm", "episode": 0, "step": 1, "phase": "act", "done": True},
+        {"condition": "silent", "episode": 1, "step": 0, "phase": "act", "done": True},
     ]
     trace_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 
@@ -70,3 +72,42 @@ def test_manifest_without_trace_still_loads(tmp_path: Path) -> None:
     assert manifest_status_message(manifests[0]) == "runner failed"
     tail_state = load_trace_tail_state(manifest=manifests[0], trace_offsets={})
     assert tail_state["new_rows"] == []
+
+
+def test_protocol_metrics_and_hints_from_trace_rows() -> None:
+    rows = [
+        {
+            "condition": "comm",
+            "episode": 0,
+            "step": 0,
+            "phase": "comm_only",
+            "glyph_a_sent": ["1111111"] * 7,
+            "glyph_b_sent": ["0000000"] * 7,
+            "glyph_a_reused_from_success": False,
+            "glyph_b_reused_from_success": False,
+            "target_a_after": "LEFT",
+            "target_b_after": "LEFT",
+            "target_a_changed": True,
+            "target_b_changed": True,
+            "value_left": 8,
+            "value_right": 2,
+        },
+        {
+            "condition": "comm",
+            "episode": 0,
+            "step": 1,
+            "phase": "act",
+            "done": True,
+            "target_a": "LEFT",
+            "target_b": "LEFT",
+            "target_a_after": "LEFT",
+            "target_b_after": "LEFT",
+            "outcome": "high_value",
+            "value_left": 8,
+            "value_right": 2,
+        },
+    ]
+    metrics = compute_protocol_metrics(rows)
+    assert metrics["post_comm_agreement_rate"] == 1.0
+    hints = build_convention_hints(rows)
+    assert hints["recent_successes"]

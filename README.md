@@ -1,6 +1,6 @@
 # ScoreG-style Local LLM Coordination Experiment
 
-このプロジェクトは、macOS Apple Silicon 上で Ollama を使い、2 体のローカル LLM エージェントが 5x5 gridworld で 7x7 binary glyph だけを使って高価値アイテムを共同回収できるかを試す最小実験基盤です。
+このプロジェクトは、macOS Apple Silicon 上で Ollama を使い、2 体のローカル LLM エージェントが 5x5 gridworld で 7x7 binary glyph だけを使って高価値アイテムを共同回収できるかを試す実験基盤です。固定 LLM のまま、反復相互作用と private memory によって局所的な convention / proto-language の芽が見えるかを観察します。
 
 ## 前提
 
@@ -71,6 +71,13 @@ make smoke MODEL=gemma3:1b
 make run MODEL=gemma3:1b
 ```
 
+長めの run:
+
+```bash
+make run MODEL=gemma3:1b EPISODES=100
+make run MODEL=gemma3:1b EPISODES=300
+```
+
 解析:
 
 ```bash
@@ -86,7 +93,7 @@ python scripts/analyze_results.py --input logs/results.csv --figure logs/summary
 
 ## Realtime Viewer
 
-Streamlit ベースの realtime viewer を追加しています。目的は、2 体の LLM がどの glyph を送り、どの行動を選び、gridworld がどう進んだかを live と replay の両方で観察することです。
+Streamlit ベースの realtime viewer を追加しています。目的は、2 体の LLM がどの glyph を送り、どの行動を選び、gridworld がどう進んだかを live と replay の両方で観察することです。viewer は read-only で、agent prompt への情報注入経路にはなりません。
 
 依存:
 
@@ -110,6 +117,13 @@ viewer には次の 3 モードがあります。
 - `replay`: 保存済み trace を episode / step 単位で再生
 - `launch`: GUI から experiment runner を起動
 
+viewer では以下も確認できます。
+
+- `comm_only` / `act` phase
+- target の before / after と changed flag
+- guard による補正の有無
+- 最近の successful glyph と same-context glyph consistency
+
 GUI から起動した run は `logs/traces/<run_id>.jsonl` と `logs/runs/<run_id>/manifest.json` を出力し、viewer はそれを監視します。
 Launch 時の runner 標準出力と標準エラーは `logs/runs/<run_id>/launcher.log` に保存されます。
 
@@ -132,7 +146,7 @@ Replay の使い方:
 
 - `logs/results.csv`: episode 単位の要約
 - `logs/episodes.jsonl`: final raw output を含む詳細ログ
-- `logs/summary.png`: 条件別平均報酬、成功率、target agreement rate の図
+- `logs/summary.png`: 条件別平均報酬、成功率、target agreement に加え、protocol metrics を含む図
 - `logs/traces/<run_id>.jsonl`: realtime viewer 用 step trace
 - `logs/runs/<run_id>/manifest.json`: run metadata
 
@@ -148,6 +162,13 @@ Replay の使い方:
 - `team_reward`
 - `target_a`
 - `target_b`
+
+step trace には以下も入ります。
+
+- `phase`, `phase_turn_index`, `act_step`
+- `target_a_before`, `target_a_after`, `target_a_changed`
+- `target_b_before`, `target_b_after`, `target_b_changed`
+- `glyph_a_reused_from_success`, `glyph_b_reused_from_success`
 
 ## よくある失敗
 
@@ -173,4 +194,4 @@ Replay の使い方:
   対象 run の trace が空、または選択した condition / episode に該当フレームがありません。
 
 - `comm` が `silent` を上回らない  
-  小型モデルでは自然に有意味な glyph 協調が出ない場合があります。まずはログを見て、モデルサイズや prompt の見直しを検討してください。
+  小型モデルでは自然に有意味な glyph 協調が出ない場合があります。`comm_only` phase を含む replay、recent successful glyph、protocol metrics を見て、glyph reuse や target update の兆候を確認してください。

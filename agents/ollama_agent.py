@@ -13,13 +13,18 @@ import numpy as np
 import requests
 from pydantic import BaseModel, Field, StringConstraints, ValidationError, field_validator
 
-from envs.scoreg_env import GLYPH_SIDE, glyph_matrix_to_rows, rows_to_glyph_matrix
+from envs.scoreg_env import (
+    GLYPH_SIDE,
+    INDEX_TO_PHASE,
+    glyph_matrix_to_rows,
+    rows_to_glyph_matrix,
+)
 
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:1b")
 OFFICIAL_OLLAMA_DOWNLOAD_URL = "https://ollama.com/download"
-MOVE_CHOICES = ("UP", "DOWN", "LEFT", "RIGHT", "STAY", "PICK")
-TARGET_CHOICES = ("LEFT", "RIGHT", "UNKNOWN")
+DEFAULT_MEMORY_RETENTION = 12
+DEFAULT_PROMPT_MEMORY_LIMIT = 6
 GlyphRow = Annotated[str, StringConstraints(pattern=rf"^[01]{{{GLYPH_SIDE}}}$")]
 
 
@@ -82,6 +87,33 @@ class DecisionGuardResult:
     reason: str = ""
 
 
+@dataclass
+class AgentNotebookEntry:
+    episode_id: int
+    condition: str
+    my_known_value: int
+    comm_sent_glyph: list[str]
+    comm_received_glyph: list[str]
+    final_target: str
+    agreement: bool
+    outcome: str
+    team_reward: float
+    glyph_helped_note: str
+
+    @property
+    def success(self) -> bool:
+        return self.outcome == "high_value"
+
+    def to_prompt_line(self) -> str:
+        return (
+            f"episode={self.episode_id} condition={self.condition} known_value={self.my_known_value} "
+            f"comm_sent={self.comm_sent_glyph} comm_received={self.comm_received_glyph} "
+            f"final_target={self.final_target} agreement={self.agreement} "
+            f"outcome={self.outcome} team_reward={self.team_reward:.2f} "
+            f"note={self.glyph_helped_note}"
+        )
+
+
 class AgentExecutionError(RuntimeError):
     """Raised when the model cannot produce a valid structured action."""
 
@@ -94,6 +126,34 @@ def _as_int_list(value: np.ndarray | list[int] | tuple[int, ...]) -> list[int]:
     if isinstance(value, np.ndarray):
         return [int(item) for item in value.tolist()]
     return [int(item) for item in value]
+
+
+def phase_name_from_observation(observation: dict[str, np.ndarray]) -> str:
+    if "phase" not in observation:
+        return "act"
+    phase_index = int(_as_int_list(observation["phase"])[0])
+    return INDEX_TO_PHASE.get(phase_index, "act")
+
+
+def known_value_for_agent(agent_name: str, observation: dict[str, np.ndarray]) -> int:
+    private_value = _as_int_list(observation["private_value"])
+    if agent_name == "agent_a":
+        return int(private_value[0])
+    return int(private_value[1])
+
+
+def select_prompt_memory_lines(
+    notebook: list[AgentNotebookEntry],
+    prompt_limit: int = DEFAULT_PROMPT_MEMORY_LIMIT,
+) -> list[str]:
+    if not notebook:
+        return ["none"]
+    recent = notebook[-DEFAULT_MEMORY_RETENTION:]
+    success_entries = [entry for entry in reversed(recent) if entry.success]
+    failure_entries = [entry for entry in reversed(recent) if not entry.success]
+    selected = (success_entries + failure_entries)[:prompt_limit]
+    ordered = list(reversed(selected))
+    return [entry.to_prompt_line() for entry in ordered]
 
 
 def build_agent_user_prompt(
@@ -111,6 +171,14 @@ def build_agent_user_prompt(
     item_positions = observation["item_positions"].tolist()
     glyph_rows = glyph_matrix_to_rows(observation["other_last_glyph"])
     step_count = int(_as_int_list(observation["step_count"])[0])
+    act_step_count = int(_as_int_list(observation.get("act_step_count", np.array([step_count], dtype=np.int64)))[0])
+    phase = phase_name_from_observation(observation)
+    phase_turn_index = int(
+        _as_int_list(observation.get("phase_turn_index", np.array([step_count], dtype=np.int64)))[0]
+    )
+    comm_only_turns = int(
+        _as_int_list(observation.get("comm_only_turns", np.array([0], dtype=np.int64)))[0]
+    )
 
     if agent_name == "agent_a":
         known_label = f"left_item={private_value[0]}"
@@ -124,7 +192,11 @@ def build_agent_user_prompt(
     return "\n".join(
         [
             "Public state:",
-            f"- step={step_count}",
+            f"- total_step={step_count}",
+            f"- act_step={act_step_count}",
+            f"- phase={phase}",
+            f"- phase_turn_index={phase_turn_index}",
+            f"- comm_only_turns={comm_only_turns}",
             f"- self_position={self_position}",
             f"- other_position={other_position}",
             f"- left_item_position={item_positions[0]}",
@@ -136,12 +208,16 @@ def build_agent_user_prompt(
             "- The other item's value is hidden. Do not invent or state it.",
             f"- current_hypothesis_target={hypothesis_target}",
             "",
-            "Private memory notes:",
+            "Private notebook excerpts:",
             memory_block,
             "",
             "Decision policy:",
-            "- Maximize team reward rather than playing passively.",
-            "- Try to keep a LEFT or RIGHT hypothesis target on every turn.",
+            "- Maximize team reward rather than acting alone.",
+            "- glyph is the only channel for hidden information.",
+            "- During comm_only phase, prioritize sending a reusable glyph that helps target agreement.",
+            "- reuse a glyph that worked in a similar situation when possible.",
+            "- Target disagreement is a failure signal; update your target after partner glyphs when needed.",
+            "- Keep a LEFT or RIGHT hypothesis target whenever possible.",
             "- Use UNKNOWN only at step 0 or when you truly cannot decide.",
             "- Use STAY only for a clear tactical reason, such as waiting on the target cell.",
             "- If your target is not reached yet, prefer moving toward it.",
@@ -223,6 +299,7 @@ def apply_decision_guard(
     previous_target: str | None,
     grid_size: int = 5,
 ) -> DecisionGuardResult:
+    phase = phase_name_from_observation(observation)
     step_count = int(_as_int_list(observation["step_count"])[0])
     effective_target = decision.target
     effective_move = decision.move
@@ -231,6 +308,14 @@ def apply_decision_guard(
     if effective_target == "UNKNOWN" and step_count >= 1:
         effective_target = resolve_hypothesis_target(agent_name, previous_target)
         reasons.append("target_unknown_after_step0")
+
+    if phase == "comm_only":
+        return DecisionGuardResult(
+            target=effective_target,
+            move=effective_move,
+            applied=bool(reasons),
+            reason=",".join(reasons),
+        )
 
     if effective_target in {"LEFT", "RIGHT"}:
         self_position = np.asarray(observation["self_position"], dtype=np.int64)
@@ -335,7 +420,8 @@ class OllamaAgent:
         base_url: str = DEFAULT_OLLAMA_BASE_URL,
         timeout_s: float = 30.0,
         max_retries: int = 3,
-        memory_limit: int = 6,
+        memory_limit: int = DEFAULT_MEMORY_RETENTION,
+        prompt_memory_limit: int = DEFAULT_PROMPT_MEMORY_LIMIT,
     ) -> None:
         self.agent_name = agent_name
         self.model = model
@@ -343,17 +429,18 @@ class OllamaAgent:
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.memory_limit = memory_limit
+        self.prompt_memory_limit = prompt_memory_limit
         default_prompt = Path(__file__).resolve().parents[1] / "prompts" / f"{agent_name}_system.txt"
         self.system_prompt_path = Path(system_prompt_path) if system_prompt_path else default_prompt
         self.system_prompt = load_system_prompt(self.system_prompt_path)
-        self.memory: list[str] = []
+        self.memory_entries: list[AgentNotebookEntry] = []
 
     def act(self, observation: dict[str, np.ndarray], previous_target: str | None = None) -> AgentTurn:
         schema_json = json.dumps(AgentDecision.model_json_schema(), ensure_ascii=True)
         user_prompt = build_agent_user_prompt(
             agent_name=self.agent_name,
             observation=observation,
-            memory=self.memory,
+            memory=select_prompt_memory_lines(self.memory_entries, prompt_limit=self.prompt_memory_limit),
             schema_json=schema_json,
             current_hypothesis_target=resolve_hypothesis_target(self.agent_name, previous_target),
         )
@@ -402,6 +489,17 @@ class OllamaAgent:
             f"{self.agent_name} failed to produce valid structured output after {self.max_retries} attempts: {last_error}"
         )
 
-    def record_episode_summary(self, summary: str) -> None:
-        self.memory.append(summary)
-        self.memory = self.memory[-self.memory_limit :]
+    def prior_success_glyph(
+        self,
+        *,
+        known_value: int,
+        target: str,
+    ) -> list[str] | None:
+        for entry in reversed(self.memory_entries):
+            if entry.success and entry.my_known_value == known_value and entry.final_target == target:
+                return list(entry.comm_sent_glyph)
+        return None
+
+    def record_episode_entry(self, entry: AgentNotebookEntry) -> None:
+        self.memory_entries.append(entry)
+        self.memory_entries = self.memory_entries[-self.memory_limit :]

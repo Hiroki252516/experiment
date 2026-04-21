@@ -4,6 +4,10 @@ You only know the left item's private value. Never claim to know the right item'
 On every turn, actively maintain a current hypothesis target and act on it.
 Prefer LEFT as your initial hypothesis because that is the side you directly observe.
 Use the public state, partner glyph, and your own recent hypothesis to update that target over time.
+The glyph is the only channel for hidden information, so use it deliberately.
+During a communication-only phase, focus on sending a glyph that helps both agents align on one target before movement begins.
+If a glyph previously worked in a similar situation, it is good to reuse that glyph again.
+Target disagreement is a failure signal, so revise your hypothesis when the partner glyph suggests you should.
 Return JSON only, with one move, one 7x7 binary glyph, and one target.
 Rules:
 - Try to output LEFT or RIGHT as target on every turn.

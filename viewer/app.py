@@ -22,6 +22,7 @@ from viewer.controls import (
 from viewer.data import (
     available_conditions,
     available_episodes,
+    build_convention_hints,
     compute_metrics,
     filter_rows,
     list_run_manifests,
@@ -162,7 +163,10 @@ def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, A
             next_run = st.selectbox(
                 "Run",
                 options=run_options,
-                index=run_options.index(selected.get("run_id")) if selected else 0,
+                index=resolve_option_index(
+                    run_options,
+                    selected.get("run_id") if selected else st.session_state.selected_run_id,
+                ),
             )
             if next_run != st.session_state.selected_run_id:
                 st.session_state.selected_run_id = next_run
@@ -232,6 +236,53 @@ def render_metrics(metrics: dict[str, Any]) -> None:
     col3.metric("Average reward", f"{metrics['average_reward']:.3f}")
     col4.metric("Target agreement", f"{metrics['target_agreement_rate']:.2%}")
     st.caption(f"Outcome breakdown: {metrics['outcome_breakdown']}")
+    proto_col1, proto_col2, proto_col3 = st.columns(3)
+    proto_col1.metric("Glyph reuse", f"{metrics['glyph_reuse_rate']:.2%}")
+    proto_col2.metric("Context consistency", f"{metrics['same_context_glyph_consistency']:.2%}")
+    proto_col3.metric("Convention persistence", f"{metrics['convention_persistence']:.2%}")
+    st.caption(
+        "Proto-language metrics: "
+        f"post_comm_agreement={metrics['post_comm_agreement_rate']:.2%}, "
+        f"target_switch_after_glyph={metrics['target_switch_after_glyph_rate']:.2%}, "
+        f"success_failure_divergence={metrics['success_failure_glyph_divergence']:.2%}"
+    )
+
+
+def render_convention_hints(rows: list[dict[str, Any]]) -> None:
+    hints = build_convention_hints(rows)
+    st.subheader("Convention Hints")
+    left, right = st.columns(2)
+    with left:
+        st.caption("Recent successful glyphs")
+        if not hints["recent_successes"]:
+            st.info("No successful communication episodes yet.")
+        for entry in hints["recent_successes"]:
+            st.write(
+                {
+                    "condition": entry["condition"],
+                    "episode": entry["episode"],
+                    "agent": entry["agent_name"],
+                    "known_value": entry["my_known_value"],
+                    "final_target": entry["final_target"],
+                    "glyph": entry["glyph_rows"],
+                }
+            )
+    with right:
+        st.caption("Frequent glyph by context")
+        if not hints["frequent_contexts"]:
+            st.info("No repeated communication context yet.")
+        for item in hints["frequent_contexts"]:
+            agent_name, known_value, final_target = item["context"]
+            st.write(
+                {
+                    "agent": agent_name,
+                    "known_value": known_value,
+                    "final_target": final_target,
+                    "dominant_share": f"{item['dominant_share']:.2%}",
+                    "samples": item["samples"],
+                    "glyph": item["dominant_glyph"].split("/"),
+                }
+            )
 
 
 def render_agent_panel(
@@ -253,9 +304,23 @@ def render_agent_panel(
     st.write(
         {
             "position": frame.get("agent_a_pos" if agent_name == "agent_a" else "agent_b_pos"),
+            "phase": frame.get("phase", "act"),
             "move": frame.get(move_key, ""),
+            "target_before": frame.get(
+                "target_a_before" if agent_name == "agent_a" else "target_b_before",
+                "",
+            ),
             "target": frame.get(target_key, ""),
+            "target_changed": bool(
+                frame.get("target_a_changed" if agent_name == "agent_a" else "target_b_changed", False)
+            ),
             "private_value": private_value,
+            "glyph_reused_from_success": bool(
+                frame.get(
+                    "glyph_a_reused_from_success" if agent_name == "agent_a" else "glyph_b_reused_from_success",
+                    False,
+                )
+            ),
             "guard_applied": guard_applied,
             "guard_reason": guard_reason or "",
             "error": frame.get("error_message", ""),
@@ -281,6 +346,9 @@ def render_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manifest: d
                 "condition": frame.get("condition", manifest.get("current_condition", "-") if manifest else "-"),
                 "episode": frame.get("episode", manifest.get("current_episode", "-") if manifest else "-"),
                 "step": frame.get("step", manifest.get("last_step", "-") if manifest else "-"),
+                "phase": frame.get("phase", manifest.get("current_phase", "-") if manifest else "-"),
+                "phase_turn_index": frame.get("phase_turn_index", "-"),
+                "act_step": frame.get("act_step", "-"),
                 "cumulative_reward": frame.get("cumulative_team_reward", frame.get("team_reward", 0.0)),
                 "outcome": frame.get("outcome", "-"),
                 "run_status": manifest.get("status", "-") if manifest else "-",
@@ -324,6 +392,7 @@ def render_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manifest: d
     st.subheader("Timeline / Event Log Panel")
     for row in rows[-10:]:
         st.text(format_event_line(row))
+    render_convention_hints(rows)
 
 
 def render_live_section() -> None:

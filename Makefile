@@ -2,6 +2,7 @@ PYTHON ?= .venv/bin/python
 PIP ?= .venv/bin/pip
 MODEL ?= gemma3:1b
 BASE_URL ?= http://localhost:11434
+EPISODES ?= 100
 
 .PHONY: setup test smoke run analyze viewer
 
@@ -17,7 +18,7 @@ smoke:
 	$(PYTHON) scripts/smoke_test.py --model $(MODEL) --base-url $(BASE_URL)
 
 run:
-	$(PYTHON) scripts/run_experiment.py --episodes 10 --conditions comm silent random --model $(MODEL) --base-url $(BASE_URL)
+	$(PYTHON) scripts/run_experiment.py --episodes $(EPISODES) --conditions comm silent random --model $(MODEL) --base-url $(BASE_URL)
 
 analyze:
 	$(PYTHON) scripts/analyze_results.py --input logs/results.csv --figure logs/summary.png

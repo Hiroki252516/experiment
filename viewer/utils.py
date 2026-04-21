@@ -26,10 +26,13 @@ def format_timestamp(value: str) -> str:
 
 
 def format_event_line(row: dict[str, Any]) -> str:
+    phase = row.get("phase", "act")
+    target_a = row.get("target_a_after", row.get("target_a"))
+    target_b = row.get("target_b_after", row.get("target_b"))
     return (
-        f"step {row.get('step')}: "
-        f"A move={row.get('move_a')}, target={row.get('target_a')} | "
-        f"B move={row.get('move_b')}, target={row.get('target_b')} | "
+        f"step {row.get('step')} [{phase}]: "
+        f"A move={row.get('move_a')}, target={target_a} | "
+        f"B move={row.get('move_b')}, target={target_b} | "
         f"reward={row.get('team_reward')} | outcome={row.get('outcome')}"
     )
 
