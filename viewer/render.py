@@ -13,12 +13,57 @@ AGENT_B_COLOR = "#ea580c"
 LEFT_ITEM_COLOR = "#16a34a"
 RIGHT_ITEM_COLOR = "#7c3aed"
 HIGHLIGHT_BORDER = "#111827"
+GLYPH_SIDE = 7
+GLYPH_GRID = np.array([203, 213, 225], dtype=np.uint8)
+
+GLYPH_STYLES: dict[str, dict[str, tuple[int, int, int]]] = {
+    "a_sent": {"on": (37, 99, 235), "off": (239, 246, 255), "border": (29, 78, 216)},
+    "a_received": {"on": (59, 130, 246), "off": (239, 246, 255), "border": (96, 165, 250)},
+    "b_sent": {"on": (234, 88, 12), "off": (255, 247, 237), "border": (194, 65, 12)},
+    "b_received": {"on": (249, 115, 22), "off": (255, 247, 237), "border": (251, 146, 60)},
+    "hint": {"on": (17, 24, 39), "off": (248, 250, 252), "border": (148, 163, 184)},
+}
 
 
-def glyph_rows_to_array(rows: list[str], scale: int = 16) -> np.ndarray:
-    matrix = np.asarray([[int(bit) for bit in row] for row in rows], dtype=np.uint8)
-    grayscale = np.where(matrix == 1, 0, 255).astype(np.uint8)
-    return np.repeat(np.repeat(grayscale, scale, axis=0), scale, axis=1)
+def normalize_glyph_rows(rows: list[str] | Any) -> list[str]:
+    if not isinstance(rows, list):
+        return ["0" * GLYPH_SIDE for _ in range(GLYPH_SIDE)]
+    normalized: list[str] = []
+    for row in rows[:GLYPH_SIDE]:
+        row_text = str(row)
+        normalized.append("".join("1" if bit == "1" else "0" for bit in row_text[:GLYPH_SIDE].ljust(GLYPH_SIDE, "0")))
+    while len(normalized) < GLYPH_SIDE:
+        normalized.append("0" * GLYPH_SIDE)
+    return normalized
+
+
+def glyph_rows_to_array(rows: list[str], scale: int = 16, role: str = "hint") -> np.ndarray:
+    glyph_rows = normalize_glyph_rows(rows)
+    style = GLYPH_STYLES.get(role, GLYPH_STYLES["hint"])
+    cell_size = max(6, int(scale))
+    line_size = max(1, cell_size // 6)
+    outer_padding = max(2, cell_size // 4)
+    canvas_size = GLYPH_SIDE * cell_size + (GLYPH_SIDE + 1) * line_size + outer_padding * 2
+    canvas = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
+    canvas[:, :] = np.asarray(style["border"], dtype=np.uint8)
+
+    inner_top = outer_padding
+    inner_left = outer_padding
+    inner_size = GLYPH_SIDE * cell_size + (GLYPH_SIDE + 1) * line_size
+    canvas[inner_top : inner_top + inner_size, inner_left : inner_left + inner_size] = GLYPH_GRID
+
+    on_color = np.asarray(style["on"], dtype=np.uint8)
+    off_color = np.asarray(style["off"], dtype=np.uint8)
+    for row_index, row in enumerate(glyph_rows):
+        for col_index, bit in enumerate(row):
+            top = inner_top + line_size + row_index * (cell_size + line_size)
+            left = inner_left + line_size + col_index * (cell_size + line_size)
+            canvas[top : top + cell_size, left : left + cell_size] = on_color if bit == "1" else off_color
+    return canvas
+
+
+def glyph_rows_text(rows: list[str] | Any) -> str:
+    return "\n".join(normalize_glyph_rows(rows))
 
 
 def _cell_entities(frame: dict[str, Any], row_index: int, col_index: int) -> tuple[list[str], str, bool]:

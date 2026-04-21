@@ -27,12 +27,23 @@ def format_timestamp(value: str) -> str:
 
 def format_event_line(row: dict[str, Any]) -> str:
     phase = row.get("phase", "act")
+    target_a_before = row.get("target_a_before", row.get("target_a"))
+    target_b_before = row.get("target_b_before", row.get("target_b"))
     target_a = row.get("target_a_after", row.get("target_a"))
     target_b = row.get("target_b_after", row.get("target_b"))
+    glyph_label = row.get("glyph_exchange_label", "")
+    target_switches: list[str] = []
+    if row.get("target_a_changed"):
+        target_switches.append(f"A target {target_a_before}->{target_a}")
+    if row.get("target_b_changed"):
+        target_switches.append(f"B target {target_b_before}->{target_b}")
+    switch_label = f" | {'; '.join(target_switches)}" if target_switches else ""
+    glyph_suffix = f" | {glyph_label}" if glyph_label else ""
     return (
         f"step {row.get('step')} [{phase}]: "
-        f"A move={row.get('move_a')}, target={target_a} | "
-        f"B move={row.get('move_b')}, target={target_b} | "
+        f"A move={row.get('move_a')}, target={target_a_before}->{target_a} | "
+        f"B move={row.get('move_b')}, target={target_b_before}->{target_b}"
+        f"{glyph_suffix}{switch_label} | "
         f"reward={row.get('team_reward')} | outcome={row.get('outcome')}"
     )
 

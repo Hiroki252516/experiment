@@ -212,6 +212,16 @@ def parse_target_rows(glyph_rows: list[str]) -> list[str]:
     return [str(row) for row in glyph_rows]
 
 
+def glyph_rows_hash(glyph_rows: list[str]) -> str:
+    return "/".join(str(row) for row in glyph_rows)
+
+
+def glyph_exchange_label(*, changed_a: bool, changed_b: bool) -> str:
+    a_label = "A->B updated" if changed_a else "A->B unchanged"
+    b_label = "B->A updated" if changed_b else "B->A unchanged"
+    return f"{a_label}, {b_label}"
+
+
 def choose_condition_glyph(
     condition: str,
     generated_rows: list[str],
@@ -254,11 +264,13 @@ def build_trace_row(
     phase_turn_index: int | None = None,
     act_step: int | None = None,
     comm_only_turns: int | None = None,
+    previous_sent_rows: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     target_before = target_before or dict(targets)
     target_after = target_after or dict(targets)
     target_changed = target_changed or {agent: False for agent in AGENT_NAMES}
     glyph_reused_from_success = glyph_reused_from_success or {agent: False for agent in AGENT_NAMES}
+    previous_sent_rows = previous_sent_rows or {agent: [] for agent in AGENT_NAMES}
     current_phase = phase or getattr(env, "phase", "act")
     current_phase_turn = phase_turn_index if phase_turn_index is not None else int(getattr(env, "phase_turn_index", 0))
     current_act_step = act_step if act_step is not None else int(getattr(env, "act_step_count", step))
@@ -267,6 +279,12 @@ def build_trace_row(
         if comm_only_turns is not None
         else int(getattr(env, "comm_only_turns", 0))
     )
+    glyph_a_hash = glyph_rows_hash(sent_rows["agent_a"])
+    glyph_b_hash = glyph_rows_hash(sent_rows["agent_b"])
+    glyph_a_received_hash = glyph_rows_hash(received_rows["agent_a"])
+    glyph_b_received_hash = glyph_rows_hash(received_rows["agent_b"])
+    glyph_a_changed = bool(previous_sent_rows.get("agent_a")) and sent_rows["agent_a"] != previous_sent_rows["agent_a"]
+    glyph_b_changed = bool(previous_sent_rows.get("agent_b")) and sent_rows["agent_b"] != previous_sent_rows["agent_b"]
     row = {
         "run_id": run_id,
         "timestamp": utc_now_iso(),
@@ -288,6 +306,17 @@ def build_trace_row(
         "glyph_b_sent": list(sent_rows["agent_b"]),
         "glyph_a_received": list(received_rows["agent_a"]),
         "glyph_b_received": list(received_rows["agent_b"]),
+        "glyph_a_hash": glyph_a_hash,
+        "glyph_b_hash": glyph_b_hash,
+        "glyph_a_received_hash": glyph_a_received_hash,
+        "glyph_b_received_hash": glyph_b_received_hash,
+        "glyph_a_changed": bool(glyph_a_changed),
+        "glyph_b_changed": bool(glyph_b_changed),
+        "glyph_event": bool(glyph_a_changed or glyph_b_changed),
+        "glyph_exchange_label": glyph_exchange_label(
+            changed_a=bool(glyph_a_changed),
+            changed_b=bool(glyph_b_changed),
+        ),
         "move_a": moves["agent_a"],
         "move_b": moves["agent_b"],
         "target_a": target_after["agent_a"],
@@ -420,6 +449,7 @@ def run_episode(
     last_raw_outputs = {agent: "" for agent in AGENT_NAMES}
     last_comm_sent_rows = {agent: list(ZERO_GLYPH_ROWS) for agent in AGENT_NAMES}
     last_comm_received_rows = {agent: list(ZERO_GLYPH_ROWS) for agent in AGENT_NAMES}
+    previous_step_sent_rows = {agent: [] for agent in AGENT_NAMES}
 
     while True:
         phase = phase_name_from_observation(observations["agent_a"])
@@ -510,6 +540,7 @@ def run_episode(
                 phase_turn_index=phase_turn_index,
                 act_step=act_step,
                 comm_only_turns=args.comm_only_turns,
+                previous_sent_rows=previous_step_sent_rows,
             )
             append_jsonl(trace_path, row)
             manifest["last_step"] = step_index
@@ -574,8 +605,10 @@ def run_episode(
             phase_turn_index=phase_turn_index,
             act_step=act_step,
             comm_only_turns=args.comm_only_turns,
+            previous_sent_rows=previous_step_sent_rows,
         )
         append_jsonl(trace_path, row)
+        previous_step_sent_rows = {agent: list(sent_rows[agent]) for agent in AGENT_NAMES}
 
         manifest["last_step"] = step_index
         manifest["current_phase"] = env.phase

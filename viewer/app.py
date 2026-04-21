@@ -1,4 +1,4 @@
-"""Streamlit app for realtime and replay visualization of ScoreG experiments."""
+"""Streamlit app for glyph-first realtime and replay visualization."""
 
 from __future__ import annotations
 
@@ -20,17 +20,19 @@ from viewer.controls import (
     sync_selected_run,
 )
 from viewer.data import (
+    adjacent_glyph_event_step,
     available_conditions,
     available_episodes,
     build_convention_hints,
     compute_metrics,
     filter_rows,
+    glyph_history_rows,
     list_run_manifests,
     load_trace_rows,
     load_trace_tail_state,
     manifest_status_message,
 )
-from viewer.render import build_grid_html, glyph_rows_to_array
+from viewer.render import build_grid_html, glyph_rows_text, glyph_rows_to_array
 from viewer.utils import (
     format_event_line,
     format_timestamp,
@@ -41,6 +43,7 @@ from viewer.utils import (
 )
 
 RUNS_DIR = PROJECT_ROOT / "logs" / "runs"
+ZERO_GLYPH_ROWS = ["0" * 7 for _ in range(7)]
 
 
 def selected_manifest(manifests: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -52,12 +55,9 @@ def selected_manifest(manifests: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def load_selected_rows(manifest: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not manifest:
+    if not manifest or not manifest.get("trace_path"):
         return []
-    trace_path = manifest.get("trace_path", "")
-    if not trace_path:
-        return []
-    return load_trace_rows(trace_path)
+    return load_trace_rows(manifest["trace_path"])
 
 
 def render_header(manifest: dict[str, Any] | None) -> None:
@@ -75,16 +75,15 @@ def render_launch_status(manifest: dict[str, Any] | None) -> None:
         st.info(f"Active subprocess is running for run_id={st.session_state.active_process_run_id}")
     elif st.session_state.active_process_run_id:
         return_code = st.session_state.active_process.poll() if st.session_state.active_process else None
-        st.caption(
-            f"Last launched run_id={st.session_state.active_process_run_id}, returncode={return_code}"
-        )
+        st.caption(f"Last launched run_id={st.session_state.active_process_run_id}, returncode={return_code}")
     if manifest:
         status_message = manifest_status_message(manifest)
-        if manifest.get("status") == "failed":
+        status = manifest.get("status")
+        if status == "failed":
             st.error(status_message)
-        elif manifest.get("status") in {"starting", "running"}:
+        elif status in {"starting", "running"}:
             st.info(status_message)
-        elif manifest.get("status") == "completed":
+        elif status == "completed":
             st.success(status_message)
     if st.session_state.active_launcher_log_path:
         tail = read_log_tail(st.session_state.active_launcher_log_path)
@@ -148,6 +147,351 @@ def render_launch_panel(manifests: list[dict[str, Any]]) -> None:
         render_launch_status(manifest)
 
 
+def phase_label(phase: str) -> str:
+    if phase == "comm_only":
+        return "COMMUNICATION PHASE"
+    return "ACTION PHASE"
+
+
+def agent_suffix(agent_name: str) -> str:
+    return "a" if agent_name == "agent_a" else "b"
+
+
+def target_transition(frame: dict[str, Any], agent_name: str) -> str:
+    suffix = agent_suffix(agent_name)
+    before = str(frame.get(f"target_{suffix}_before", frame.get(f"target_{suffix}", "UNKNOWN")))
+    after = str(frame.get(f"target_{suffix}_after", frame.get(f"target_{suffix}", "UNKNOWN")))
+    return f"{before} -> {after}" if before != after else after
+
+
+def render_glyph_card(
+    *,
+    title: str,
+    rows: list[str],
+    role: str,
+    width: int,
+    subtitle: str = "",
+    detail_lines: list[str] | None = None,
+    show_rows: bool = False,
+) -> None:
+    st.caption(title)
+    st.image(glyph_rows_to_array(rows, scale=20 if width >= 220 else 10, role=role), width=width, clamp=True)
+    if subtitle:
+        st.caption(subtitle)
+    for line in detail_lines or []:
+        st.caption(line)
+    if show_rows:
+        st.code(glyph_rows_text(rows), language="text")
+
+
+def render_target_switches(frame: dict[str, Any]) -> None:
+    switches: list[str] = []
+    if frame.get("target_a_changed"):
+        switches.append(f"agent_a target switched {target_transition(frame, 'agent_a')}")
+    if frame.get("target_b_changed"):
+        switches.append(f"agent_b target switched {target_transition(frame, 'agent_b')}")
+    if switches:
+        for switch in switches:
+            st.warning(switch)
+
+
+def render_glyph_theater(frame: dict[str, Any]) -> None:
+    st.subheader("Glyph Theater")
+    phase = str(frame.get("phase", "act"))
+    left, right = st.columns(2)
+    with left:
+        render_glyph_card(
+            title="agent_a sent",
+            rows=frame.get("glyph_a_sent", ZERO_GLYPH_ROWS),
+            role="a_sent",
+            width=260,
+            subtitle=f"step {frame.get('step', '-')} | {phase_label(phase)}",
+            detail_lines=[
+                f"move={frame.get('move_a', '-')}",
+                f"target={target_transition(frame, 'agent_a')}",
+                f"guard={frame.get('guard_a_reason', '') or 'none'}",
+            ],
+        )
+    with right:
+        render_glyph_card(
+            title="agent_b received",
+            rows=frame.get("glyph_b_received", ZERO_GLYPH_ROWS),
+            role="b_received",
+            width=260,
+            subtitle=f"agent_b sees A's glyph | {frame.get('glyph_exchange_label', '')}",
+            detail_lines=[
+                f"move={frame.get('move_b', '-')}",
+                f"target={target_transition(frame, 'agent_b')}",
+                f"outcome={frame.get('outcome', '-')}",
+            ],
+        )
+    left, right = st.columns(2)
+    with left:
+        render_glyph_card(
+            title="agent_b sent",
+            rows=frame.get("glyph_b_sent", ZERO_GLYPH_ROWS),
+            role="b_sent",
+            width=260,
+            subtitle=f"step {frame.get('step', '-')} | {frame.get('glyph_exchange_label', '')}",
+            detail_lines=[
+                f"move={frame.get('move_b', '-')}",
+                f"target={target_transition(frame, 'agent_b')}",
+                f"reused_success={bool(frame.get('glyph_b_reused_from_success', False))}",
+            ],
+        )
+    with right:
+        render_glyph_card(
+            title="agent_a received",
+            rows=frame.get("glyph_a_received", ZERO_GLYPH_ROWS),
+            role="a_received",
+            width=260,
+            subtitle="agent_a sees B's glyph",
+            detail_lines=[
+                f"move={frame.get('move_a', '-')}",
+                f"target={target_transition(frame, 'agent_a')}",
+                f"reused_success={bool(frame.get('glyph_a_reused_from_success', False))}",
+            ],
+        )
+    render_target_switches(frame)
+
+
+def render_glyph_history_strip(rows: list[dict[str, Any]], frame: dict[str, Any]) -> None:
+    st.subheader("Glyph History Strip")
+    history = glyph_history_rows(rows, int(frame.get("step", 0)), limit=8)
+    if not history:
+        st.info("waiting for first glyph frame")
+        return
+    columns = st.columns(len(history))
+    current_frame_step = int(frame.get("step", -1))
+    for column, history_row in zip(columns, history):
+        with column:
+            step = int(history_row.get("step", 0))
+            label = f"step {step}"
+            if step == current_frame_step:
+                label += " | current"
+            st.caption(label)
+            if history_row.get("glyph_event"):
+                st.caption("glyph event")
+            st.image(
+                glyph_rows_to_array(history_row.get("glyph_a_sent", ZERO_GLYPH_ROWS), scale=8, role="a_sent"),
+                width=88,
+                clamp=True,
+            )
+            st.image(
+                glyph_rows_to_array(history_row.get("glyph_b_sent", ZERO_GLYPH_ROWS), scale=8, role="b_sent"),
+                width=88,
+                clamp=True,
+            )
+            st.caption(f"A {history_row.get('target_a_after', history_row.get('target_a', '-'))}")
+            st.caption(f"B {history_row.get('target_b_after', history_row.get('target_b', '-'))}")
+
+
+def render_communication_timeline(rows: list[dict[str, Any]]) -> None:
+    st.subheader("Communication Timeline")
+    if not rows:
+        st.info("No trace rows available yet.")
+        return
+    for row in rows[-12:]:
+        st.text(format_event_line(row))
+
+
+def render_metrics(metrics: dict[str, Any]) -> None:
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Episodes", metrics["episodes"])
+    col2.metric("Success rate", f"{metrics['success_rate']:.2%}")
+    col3.metric("Average reward", f"{metrics['average_reward']:.3f}")
+    col4.metric("Target agreement", f"{metrics['target_agreement_rate']:.2%}")
+    st.caption(f"Outcome breakdown: {metrics['outcome_breakdown']}")
+    proto_col1, proto_col2, proto_col3 = st.columns(3)
+    proto_col1.metric("Glyph reuse", f"{metrics['glyph_reuse_rate']:.2%}")
+    proto_col2.metric("Context consistency", f"{metrics['same_context_glyph_consistency']:.2%}")
+    proto_col3.metric("Convention persistence", f"{metrics['convention_persistence']:.2%}")
+    st.caption(
+        "Proto-language metrics: "
+        f"post_comm_agreement={metrics['post_comm_agreement_rate']:.2%}, "
+        f"target_switch_after_glyph={metrics['target_switch_after_glyph_rate']:.2%}, "
+        f"success_failure_divergence={metrics['success_failure_glyph_divergence']:.2%}"
+    )
+
+
+def render_status_summary(frame: dict[str, Any], metrics: dict[str, Any], manifest: dict[str, Any] | None) -> None:
+    st.subheader("Run Summary")
+    st.write(
+        {
+            "condition": frame.get("condition", manifest.get("current_condition", "-") if manifest else "-"),
+            "episode": frame.get("episode", manifest.get("current_episode", "-") if manifest else "-"),
+            "step": frame.get("step", manifest.get("last_step", "-") if manifest else "-"),
+            "phase": frame.get("phase", manifest.get("current_phase", "-") if manifest else "-"),
+            "phase_turn_index": frame.get("phase_turn_index", "-"),
+            "act_step": frame.get("act_step", "-"),
+            "team_reward": frame.get("team_reward", 0.0),
+            "cumulative_team_reward": frame.get("cumulative_team_reward", 0.0),
+            "run_status": manifest.get("status", "-") if manifest else "-",
+            "started_at": format_timestamp(manifest.get("started_at", "")) if manifest else "-",
+            "completed_at": format_timestamp(manifest.get("completed_at", "")) if manifest else "-",
+        }
+    )
+    render_metrics(metrics)
+
+
+def render_agent_panel(agent_name: str, frame: dict[str, Any]) -> None:
+    suffix = agent_suffix(agent_name)
+    st.subheader(agent_name)
+    private_value = int(frame.get("value_left", 0)) if agent_name == "agent_a" else int(frame.get("value_right", 0))
+    st.write(
+        {
+            "position": frame.get(f"agent_{suffix}_pos"),
+            "phase": frame.get("phase", "act"),
+            "move": frame.get(f"move_{suffix}", ""),
+            "target": target_transition(frame, agent_name),
+            "target_changed": bool(frame.get(f"target_{suffix}_changed", False)),
+            "private_value": private_value,
+            "glyph_reused_from_success": bool(frame.get(f"glyph_{suffix}_reused_from_success", False)),
+            "glyph_changed": bool(frame.get(f"glyph_{suffix}_changed", False)),
+            "guard_applied": bool(frame.get(f"guard_{suffix}_applied", False)),
+            "guard_reason": frame.get(f"guard_{suffix}_reason", "") or "",
+            "error": frame.get("error_message", ""),
+        }
+    )
+    sent_col, received_col = st.columns(2)
+    with sent_col:
+        render_glyph_card(
+            title="Sent glyph",
+            rows=frame.get(f"glyph_{suffix}_sent", ZERO_GLYPH_ROWS),
+            role=f"{suffix}_sent",
+            width=112,
+            show_rows=False,
+        )
+    with received_col:
+        peer_suffix = "b" if suffix == "a" else "a"
+        render_glyph_card(
+            title="Received glyph",
+            rows=frame.get(f"glyph_{suffix}_received", ZERO_GLYPH_ROWS),
+            role=f"{peer_suffix}_received",
+            width=112,
+            show_rows=False,
+        )
+    st.caption("Raw JSON output")
+    st.code(frame.get(f"raw_{suffix}", ""), language="json")
+
+
+def render_convention_hints(rows: list[dict[str, Any]]) -> None:
+    hints = build_convention_hints(rows)
+    st.subheader("Convention Hints")
+    left, right = st.columns(2)
+    with left:
+        st.caption("Recent successful glyphs")
+        if not hints["recent_successes"]:
+            st.info("No successful communication episodes yet.")
+        for entry in hints["recent_successes"]:
+            cols = st.columns([0.55, 1.45])
+            with cols[0]:
+                render_glyph_card(
+                    title=f"{entry['agent_name']} episode {entry['episode']}",
+                    rows=entry["glyph_rows"],
+                    role="hint",
+                    width=92,
+                )
+            with cols[1]:
+                st.caption(
+                    f"condition={entry['condition']} | known_value={entry['my_known_value']} | final_target={entry['final_target']}"
+                )
+    with right:
+        st.caption("Frequent glyph by context")
+        if not hints["frequent_contexts"]:
+            st.info("No repeated communication context yet.")
+        for item in hints["frequent_contexts"]:
+            agent_name, known_value, final_target = item["context"]
+            cols = st.columns([0.55, 1.45])
+            with cols[0]:
+                render_glyph_card(
+                    title=agent_name,
+                    rows=item["dominant_rows"],
+                    role="hint",
+                    width=92,
+                )
+            with cols[1]:
+                st.caption(
+                    f"known_value={known_value} | final_target={final_target} | dominant_share={item['dominant_share']:.2%} | samples={item['samples']}"
+                )
+
+
+def render_main_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manifest: dict[str, Any] | None) -> None:
+    render_glyph_theater(frame)
+    render_glyph_history_strip(rows, frame)
+    render_communication_timeline(rows)
+
+    status_col, agent_a_col, agent_b_col = st.columns([1.0, 1.1, 1.1])
+    with status_col:
+        render_status_summary(frame, compute_metrics(rows), manifest)
+        st.subheader("Gridworld Panel")
+        st.markdown(build_grid_html(frame), unsafe_allow_html=True)
+    with agent_a_col:
+        render_agent_panel("agent_a", frame)
+    with agent_b_col:
+        render_agent_panel("agent_b", frame)
+    render_convention_hints(rows)
+
+
+def render_live_section() -> None:
+    @st.fragment(run_every="1s")
+    def live_fragment() -> None:
+        manifests = list_run_manifests(RUNS_DIR)
+        sync_selected_run(manifests)
+        manifest = selected_manifest(manifests)
+        rows = load_selected_rows(manifest)
+        tail_state = load_trace_tail_state(
+            manifest=manifest,
+            trace_offsets=dict(st.session_state.trace_offsets),
+        )
+        st.session_state.trace_offsets = tail_state["trace_offsets"]
+        if st.session_state.selected_condition:
+            rows = filter_rows(rows, condition=st.session_state.selected_condition)
+        episode_options = available_episodes(rows, st.session_state.selected_condition or None)
+        if episode_options and st.session_state.selected_episode in episode_options:
+            rows = filter_rows(rows, episode=st.session_state.selected_episode)
+
+        frame = rows[-1] if rows else {}
+        if not frame:
+            if manifest:
+                status = manifest.get("status")
+                if status == "failed":
+                    st.error(manifest_status_message(manifest))
+                elif status == "completed":
+                    st.warning(manifest_status_message(manifest))
+                else:
+                    st.info("waiting for first glyph frame")
+                    if manifest.get("current_phase") == "comm_only":
+                        st.caption("movement is paused, glyph exchange is active")
+            else:
+                st.info("No live trace available yet. Start a run from Launch View or wait for logs.")
+            render_launch_status(manifest)
+            return
+
+        render_main_panels(frame, rows, manifest)
+        render_launch_status(manifest)
+
+    live_fragment()
+
+
+def render_replay_section(manifest: dict[str, Any] | None, rows: list[dict[str, Any]]) -> None:
+    filtered = filter_rows(
+        rows,
+        condition=st.session_state.selected_condition or None,
+        episode=st.session_state.selected_episode,
+    )
+    if not filtered:
+        if manifest:
+            st.info(manifest_status_message(manifest))
+        else:
+            st.info("No replay frames available for the selected run and episode.")
+        return
+    step_map = {int(row.get("step", 0)): row for row in filtered}
+    frame = step_map.get(st.session_state.selected_step, filtered[-1])
+    render_main_panels(frame, filtered, manifest)
+    render_launch_status(manifest)
+
+
 def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, Any]]) -> None:
     sync_selected_run(manifests)
     selected = selected_manifest(manifests)
@@ -163,7 +507,7 @@ def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, A
     if not episode_options:
         st.session_state.selected_episode = 0
 
-    col1, col2, col3, col4 = st.columns([1.2, 1.3, 1.3, 1.2])
+    col1, col2, col3, col4 = st.columns([1.1, 1.4, 1.2, 1.1])
     with col1:
         st.session_state.mode = st.radio("Mode", options=["live", "replay"], horizontal=True)
     with col2:
@@ -215,7 +559,7 @@ def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, A
             max_value=max_step,
             value=min(st.session_state.selected_step, max_step),
         )
-        left, middle, right, speed_col = st.columns([1, 1, 1, 1.2])
+        left, middle, right, prev_event_col, next_event_col, speed_col = st.columns([1, 1, 1, 1.1, 1.1, 1.2])
         with left:
             if st.button("Prev"):
                 st.session_state.selected_step = max(0, st.session_state.selected_step - 1)
@@ -226,6 +570,16 @@ def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, A
         with right:
             if st.button("Next"):
                 st.session_state.selected_step = min(max_step, st.session_state.selected_step + 1)
+        with prev_event_col:
+            if st.button("Prev glyph event"):
+                event_step = adjacent_glyph_event_step(episode_rows, st.session_state.selected_step, -1)
+                if event_step is not None:
+                    st.session_state.selected_step = event_step
+        with next_event_col:
+            if st.button("Next glyph event"):
+                event_step = adjacent_glyph_event_step(episode_rows, st.session_state.selected_step, 1)
+                if event_step is not None:
+                    st.session_state.selected_step = event_step
         with speed_col:
             st.session_state.playback_speed = st.select_slider(
                 "Speed",
@@ -235,228 +589,6 @@ def render_control_panel(manifests: list[dict[str, Any]], rows: list[dict[str, A
         advance_playback(max_step)
 
     render_launch_panel(manifests)
-
-
-def render_metrics(metrics: dict[str, Any]) -> None:
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Episodes", metrics["episodes"])
-    col2.metric("Success rate", f"{metrics['success_rate']:.2%}")
-    col3.metric("Average reward", f"{metrics['average_reward']:.3f}")
-    col4.metric("Target agreement", f"{metrics['target_agreement_rate']:.2%}")
-    st.caption(f"Outcome breakdown: {metrics['outcome_breakdown']}")
-    proto_col1, proto_col2, proto_col3 = st.columns(3)
-    proto_col1.metric("Glyph reuse", f"{metrics['glyph_reuse_rate']:.2%}")
-    proto_col2.metric("Context consistency", f"{metrics['same_context_glyph_consistency']:.2%}")
-    proto_col3.metric("Convention persistence", f"{metrics['convention_persistence']:.2%}")
-    st.caption(
-        "Proto-language metrics: "
-        f"post_comm_agreement={metrics['post_comm_agreement_rate']:.2%}, "
-        f"target_switch_after_glyph={metrics['target_switch_after_glyph_rate']:.2%}, "
-        f"success_failure_divergence={metrics['success_failure_glyph_divergence']:.2%}"
-    )
-
-
-def render_convention_hints(rows: list[dict[str, Any]]) -> None:
-    hints = build_convention_hints(rows)
-    st.subheader("Convention Hints")
-    left, right = st.columns(2)
-    with left:
-        st.caption("Recent successful glyphs")
-        if not hints["recent_successes"]:
-            st.info("No successful communication episodes yet.")
-        for entry in hints["recent_successes"]:
-            st.write(
-                {
-                    "condition": entry["condition"],
-                    "episode": entry["episode"],
-                    "agent": entry["agent_name"],
-                    "known_value": entry["my_known_value"],
-                    "final_target": entry["final_target"],
-                    "glyph": entry["glyph_rows"],
-                }
-            )
-    with right:
-        st.caption("Frequent glyph by context")
-        if not hints["frequent_contexts"]:
-            st.info("No repeated communication context yet.")
-        for item in hints["frequent_contexts"]:
-            agent_name, known_value, final_target = item["context"]
-            st.write(
-                {
-                    "agent": agent_name,
-                    "known_value": known_value,
-                    "final_target": final_target,
-                    "dominant_share": f"{item['dominant_share']:.2%}",
-                    "samples": item["samples"],
-                    "glyph": item["dominant_glyph"].split("/"),
-                }
-            )
-
-
-def render_agent_panel(
-    agent_name: str,
-    frame: dict[str, Any],
-    *,
-    sent_key: str,
-    received_key: str,
-    move_key: str,
-    target_key: str,
-    raw_key: str,
-    guard_applied_key: str,
-    guard_reason_key: str,
-    private_value: int,
-) -> None:
-    st.subheader(agent_name)
-    guard_applied = bool(frame.get(guard_applied_key, False))
-    guard_reason = frame.get(guard_reason_key, "")
-    st.write(
-        {
-            "position": frame.get("agent_a_pos" if agent_name == "agent_a" else "agent_b_pos"),
-            "phase": frame.get("phase", "act"),
-            "move": frame.get(move_key, ""),
-            "target_before": frame.get(
-                "target_a_before" if agent_name == "agent_a" else "target_b_before",
-                "",
-            ),
-            "target": frame.get(target_key, ""),
-            "target_changed": bool(
-                frame.get("target_a_changed" if agent_name == "agent_a" else "target_b_changed", False)
-            ),
-            "private_value": private_value,
-            "glyph_reused_from_success": bool(
-                frame.get(
-                    "glyph_a_reused_from_success" if agent_name == "agent_a" else "glyph_b_reused_from_success",
-                    False,
-                )
-            ),
-            "guard_applied": guard_applied,
-            "guard_reason": guard_reason or "",
-            "error": frame.get("error_message", ""),
-        }
-    )
-    sent_col, received_col = st.columns(2)
-    with sent_col:
-        st.caption("Sent glyph")
-        st.image(glyph_rows_to_array(frame.get(sent_key, ["0" * 7] * 7)), clamp=True)
-    with received_col:
-        st.caption("Received glyph")
-        st.image(glyph_rows_to_array(frame.get(received_key, ["0" * 7] * 7)), clamp=True)
-    st.caption("Raw JSON output")
-    st.code(frame.get(raw_key, ""), language="json")
-
-
-def render_panels(frame: dict[str, Any], rows: list[dict[str, Any]], manifest: dict[str, Any] | None) -> None:
-    status_col, grid_col = st.columns([1.2, 1.3])
-    with status_col:
-        st.subheader("Live / Replay Status")
-        st.write(
-            {
-                "condition": frame.get("condition", manifest.get("current_condition", "-") if manifest else "-"),
-                "episode": frame.get("episode", manifest.get("current_episode", "-") if manifest else "-"),
-                "step": frame.get("step", manifest.get("last_step", "-") if manifest else "-"),
-                "phase": frame.get("phase", manifest.get("current_phase", "-") if manifest else "-"),
-                "phase_turn_index": frame.get("phase_turn_index", "-"),
-                "act_step": frame.get("act_step", "-"),
-                "cumulative_reward": frame.get("cumulative_team_reward", frame.get("team_reward", 0.0)),
-                "outcome": frame.get("outcome", "-"),
-                "run_status": manifest.get("status", "-") if manifest else "-",
-                "started_at": format_timestamp(manifest.get("started_at", "")) if manifest else "-",
-                "completed_at": format_timestamp(manifest.get("completed_at", "")) if manifest else "-",
-            }
-        )
-        render_metrics(compute_metrics(rows))
-    with grid_col:
-        st.subheader("Gridworld Panel")
-        st.markdown(build_grid_html(frame), unsafe_allow_html=True)
-
-    agent_a_col, agent_b_col = st.columns(2)
-    with agent_a_col:
-        render_agent_panel(
-            "agent_a",
-            frame,
-            sent_key="glyph_a_sent",
-            received_key="glyph_a_received",
-            move_key="move_a",
-            target_key="target_a",
-            raw_key="raw_a",
-            guard_applied_key="guard_a_applied",
-            guard_reason_key="guard_a_reason",
-            private_value=int(frame.get("value_left", 0)),
-        )
-    with agent_b_col:
-        render_agent_panel(
-            "agent_b",
-            frame,
-            sent_key="glyph_b_sent",
-            received_key="glyph_b_received",
-            move_key="move_b",
-            target_key="target_b",
-            raw_key="raw_b",
-            guard_applied_key="guard_b_applied",
-            guard_reason_key="guard_b_reason",
-            private_value=int(frame.get("value_right", 0)),
-        )
-
-    st.subheader("Timeline / Event Log Panel")
-    for row in rows[-10:]:
-        st.text(format_event_line(row))
-    render_convention_hints(rows)
-
-
-def render_live_section() -> None:
-    @st.fragment(run_every="1s")
-    def live_fragment() -> None:
-        manifests = list_run_manifests(RUNS_DIR)
-        sync_selected_run(manifests)
-        manifest = selected_manifest(manifests)
-        rows = load_selected_rows(manifest)
-        tail_state = load_trace_tail_state(
-            manifest=manifest,
-            trace_offsets=dict(st.session_state.trace_offsets),
-        )
-        st.session_state.trace_offsets = tail_state["trace_offsets"]
-
-        if st.session_state.selected_condition:
-            rows = filter_rows(rows, condition=st.session_state.selected_condition)
-        if st.session_state.selected_episode in available_episodes(rows):
-            rows = filter_rows(rows, episode=st.session_state.selected_episode)
-
-        frame = rows[-1] if rows else {}
-        if not frame:
-            if manifest:
-                status_message = manifest_status_message(manifest)
-                if manifest.get("status") == "failed":
-                    st.error(status_message)
-                elif manifest.get("status") == "completed":
-                    st.warning(status_message)
-                else:
-                    st.info(status_message)
-            else:
-                st.info("No live trace available yet. Start a run from Launch View or wait for logs.")
-            render_launch_status(manifest)
-            return
-        render_panels(frame, rows, manifest)
-        render_launch_status(manifest)
-
-    live_fragment()
-
-
-def render_replay_section(manifest: dict[str, Any] | None, rows: list[dict[str, Any]]) -> None:
-    filtered = filter_rows(
-        rows,
-        condition=st.session_state.selected_condition or None,
-        episode=st.session_state.selected_episode,
-    )
-    if not filtered:
-        if manifest:
-            st.info(manifest_status_message(manifest))
-        else:
-            st.info("No replay frames available for the selected run and episode.")
-        return
-    step_map = {int(row.get("step", 0)): row for row in filtered}
-    frame = step_map.get(st.session_state.selected_step, filtered[-1])
-    render_panels(frame, filtered, manifest)
-    render_launch_status(manifest)
 
 
 def main() -> None:

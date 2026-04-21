@@ -45,6 +45,14 @@ def test_trace_row_has_required_keys() -> None:
         "glyph_b_sent",
         "glyph_a_received",
         "glyph_b_received",
+        "glyph_a_hash",
+        "glyph_b_hash",
+        "glyph_a_received_hash",
+        "glyph_b_received_hash",
+        "glyph_a_changed",
+        "glyph_b_changed",
+        "glyph_event",
+        "glyph_exchange_label",
         "move_a",
         "move_b",
         "target_a",
@@ -74,6 +82,7 @@ def test_trace_row_has_required_keys() -> None:
     assert row["done"] is True
     assert row["outcome"] == "max_steps"
     assert row["guard_b_reason"] == "stay_to_greedy_move"
+    assert row["glyph_event"] is False
 
 
 def test_manifest_has_required_keys() -> None:

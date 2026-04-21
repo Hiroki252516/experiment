@@ -93,7 +93,7 @@ python scripts/analyze_results.py --input logs/results.csv --figure logs/summary
 
 ## Realtime Viewer
 
-Streamlit ベースの realtime viewer を追加しています。目的は、2 体の LLM がどの glyph を送り、どの行動を選び、gridworld がどう進んだかを live と replay の両方で観察することです。viewer は read-only で、agent prompt への情報注入経路にはなりません。
+Streamlit ベースの realtime viewer を追加しています。目的は、2 体の LLM がどの 7x7 glyph を送り、相手が何を受け取り、その直後に target / move / outcome がどう変わったかを live と replay の両方で観察することです。viewer は read-only で、agent prompt への情報注入経路にはなりません。
 
 依存:
 
@@ -117,11 +117,19 @@ viewer には次の 3 モードがあります。
 - `replay`: 保存済み trace を episode / step 単位で再生
 - `launch`: GUI から experiment runner を起動
 
+glyph-first UI では次を上から順に表示します。
+
+- `Glyph Theater`: `agent_a sent / agent_b received / agent_b sent / agent_a received` を大きく並列表示
+- `Glyph History Strip`: 直近 8 step の送信 glyph を film strip 風に表示
+- `Communication Timeline`: glyph 変化、target switch、move、outcome の関係を時系列表示
+- `Gridworld / Agent Detail / Convention Hints`: glyph の因果を見る補助表示
+
 viewer では以下も確認できます。
 
 - `comm_only` / `act` phase
 - target の before / after と changed flag
 - guard による補正の有無
+- `Prev glyph event` / `Next glyph event` による replay ジャンプ
 - 最近の successful glyph と same-context glyph consistency
 
 GUI から起動した run は `logs/traces/<run_id>.jsonl` と `logs/runs/<run_id>/manifest.json` を出力し、viewer はそれを監視します。
@@ -141,6 +149,7 @@ Replay の使い方:
 3. `Mode` を `replay` に切り替える
 4. `Condition`, `Episode`, `Step` を選ぶ
 5. `Play/Pause`, `Prev`, `Next` で確認する
+6. glyph の変化点だけを追いたい場合は `Prev glyph event`, `Next glyph event` を使う
 
 ## 結果の見方
 
@@ -169,6 +178,9 @@ step trace には以下も入ります。
 - `target_a_before`, `target_a_after`, `target_a_changed`
 - `target_b_before`, `target_b_after`, `target_b_changed`
 - `glyph_a_reused_from_success`, `glyph_b_reused_from_success`
+- `glyph_a_hash`, `glyph_b_hash`
+- `glyph_a_received_hash`, `glyph_b_received_hash`
+- `glyph_a_changed`, `glyph_b_changed`, `glyph_event`, `glyph_exchange_label`
 
 ## よくある失敗
 

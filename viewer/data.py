@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 AGENT_NAMES = ("agent_a", "agent_b")
+GLYPH_SIDE = 7
+ZERO_GLYPH_ROWS = ["0" * GLYPH_SIDE for _ in range(GLYPH_SIDE)]
 
 
 def load_manifest(manifest_path: str | Path) -> dict[str, Any]:
@@ -41,11 +43,77 @@ def parse_jsonl_lines(lines: list[str]) -> list[dict[str, Any]]:
     return rows
 
 
+def coerce_glyph_rows(glyph_rows: Any) -> list[str]:
+    if not isinstance(glyph_rows, list):
+        return list(ZERO_GLYPH_ROWS)
+    rows: list[str] = []
+    for row in glyph_rows[:GLYPH_SIDE]:
+        row_text = str(row)
+        if len(row_text) < GLYPH_SIDE:
+            row_text = row_text.ljust(GLYPH_SIDE, "0")
+        rows.append("".join("1" if bit == "1" else "0" for bit in row_text[:GLYPH_SIDE]))
+    while len(rows) < GLYPH_SIDE:
+        rows.append("0" * GLYPH_SIDE)
+    return rows
+
+
+def glyph_hash(glyph_rows: Any) -> str:
+    return glyph_key(coerce_glyph_rows(glyph_rows))
+
+
+def _glyph_exchange_label(changed_a: bool, changed_b: bool) -> str:
+    left = "A->B updated" if changed_a else "A->B unchanged"
+    right = "B->A updated" if changed_b else "B->A unchanged"
+    return f"{left}, {right}"
+
+
+def augment_trace_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    previous_sent_by_episode: dict[tuple[str, int], dict[str, list[str]]] = {}
+    enriched_rows: list[dict[str, Any]] = []
+    for row in rows:
+        enriched = dict(row)
+        context = (str(enriched.get("condition", "")), int(enriched.get("episode", -1)))
+        sent_a = coerce_glyph_rows(enriched.get("glyph_a_sent"))
+        sent_b = coerce_glyph_rows(enriched.get("glyph_b_sent"))
+        received_a = coerce_glyph_rows(enriched.get("glyph_a_received"))
+        received_b = coerce_glyph_rows(enriched.get("glyph_b_received"))
+
+        enriched["glyph_a_sent"] = sent_a
+        enriched["glyph_b_sent"] = sent_b
+        enriched["glyph_a_received"] = received_a
+        enriched["glyph_b_received"] = received_b
+        enriched.setdefault("glyph_a_hash", glyph_hash(sent_a))
+        enriched.setdefault("glyph_b_hash", glyph_hash(sent_b))
+        enriched.setdefault("glyph_a_received_hash", glyph_hash(received_a))
+        enriched.setdefault("glyph_b_received_hash", glyph_hash(received_b))
+
+        previous = previous_sent_by_episode.get(context)
+        default_changed = False if previous is None else sent_a != previous["agent_a"]
+        enriched.setdefault("glyph_a_changed", default_changed)
+        default_changed = False if previous is None else sent_b != previous["agent_b"]
+        enriched.setdefault("glyph_b_changed", default_changed)
+        enriched.setdefault(
+            "glyph_event",
+            bool(enriched.get("glyph_a_changed", False) or enriched.get("glyph_b_changed", False)),
+        )
+        enriched.setdefault(
+            "glyph_exchange_label",
+            _glyph_exchange_label(
+                bool(enriched.get("glyph_a_changed", False)),
+                bool(enriched.get("glyph_b_changed", False)),
+            ),
+        )
+
+        previous_sent_by_episode[context] = {"agent_a": sent_a, "agent_b": sent_b}
+        enriched_rows.append(enriched)
+    return enriched_rows
+
+
 def load_trace_rows(trace_path: str | Path) -> list[dict[str, Any]]:
     path = Path(trace_path)
     if not path.exists():
         return []
-    return parse_jsonl_lines(path.read_text(encoding="utf-8").splitlines())
+    return augment_trace_rows(parse_jsonl_lines(path.read_text(encoding="utf-8").splitlines()))
 
 
 def tail_jsonl(trace_path: str | Path, offset: int = 0) -> tuple[list[dict[str, Any]], int]:
@@ -65,7 +133,7 @@ def tail_jsonl(trace_path: str | Path, offset: int = 0) -> tuple[list[dict[str, 
         next_offset = offset + last_newline + 1
         chunk = chunk[: last_newline + 1]
     lines = chunk.decode("utf-8", errors="ignore").splitlines()
-    return parse_jsonl_lines(lines), next_offset
+    return augment_trace_rows(parse_jsonl_lines(lines)), next_offset
 
 
 def load_trace_tail_state(
@@ -131,8 +199,33 @@ def final_episode_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def glyph_key(glyph_rows: list[str] | Any) -> str:
-    rows = glyph_rows if isinstance(glyph_rows, list) else []
+    rows = coerce_glyph_rows(glyph_rows)
     return "/".join(str(row) for row in rows)
+
+
+def glyph_event_steps(rows: list[dict[str, Any]]) -> list[int]:
+    return [int(row.get("step", 0)) for row in rows if bool(row.get("glyph_event", False))]
+
+
+def glyph_history_rows(rows: list[dict[str, Any]], current_step: int, limit: int = 8) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    target_index = len(rows) - 1
+    for index, row in enumerate(rows):
+        if int(row.get("step", 0)) == int(current_step):
+            target_index = index
+            break
+    start_index = max(0, target_index - max(limit - 1, 0))
+    return rows[start_index : target_index + 1]
+
+
+def adjacent_glyph_event_step(rows: list[dict[str, Any]], current_step: int, direction: int) -> int | None:
+    event_steps = glyph_event_steps(rows)
+    if direction < 0:
+        candidates = [step for step in event_steps if step < current_step]
+        return candidates[-1] if candidates else None
+    candidates = [step for step in event_steps if step > current_step]
+    return candidates[0] if candidates else None
 
 
 def representative_protocol_entries(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -305,6 +398,7 @@ def build_convention_hints(rows: list[dict[str, Any]], limit: int = 5) -> dict[s
             {
                 "context": context,
                 "dominant_glyph": dominant_glyph,
+                "dominant_rows": dominant_glyph.split("/"),
                 "dominant_share": dominant_count / len(glyphs),
                 "samples": len(glyphs),
             }
