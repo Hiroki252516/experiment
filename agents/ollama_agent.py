@@ -22,6 +22,7 @@ from envs.scoreg_env import (
 
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:1b")
+DEFAULT_AGENT_TIMEOUT_S = float(os.getenv("OLLAMA_TIMEOUT_S", "120.0"))
 OFFICIAL_OLLAMA_DOWNLOAD_URL = "https://ollama.com/download"
 DEFAULT_MEMORY_RETENTION = 12
 DEFAULT_PROMPT_MEMORY_LIMIT = 6
@@ -418,7 +419,7 @@ class OllamaAgent:
         model: str = DEFAULT_OLLAMA_MODEL,
         system_prompt_path: str | Path | None = None,
         base_url: str = DEFAULT_OLLAMA_BASE_URL,
-        timeout_s: float = 30.0,
+        timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
         max_retries: int = 3,
         memory_limit: int = DEFAULT_MEMORY_RETENTION,
         prompt_memory_limit: int = DEFAULT_PROMPT_MEMORY_LIMIT,
@@ -486,7 +487,8 @@ class OllamaAgent:
                 ]
 
         raise AgentExecutionError(
-            f"{self.agent_name} failed to produce valid structured output after {self.max_retries} attempts: {last_error}"
+            f"{self.agent_name} failed to produce valid structured output after "
+            f"{self.max_retries} attempts with timeout_s={self.timeout_s}: {last_error}"
         )
 
     def prior_success_glyph(

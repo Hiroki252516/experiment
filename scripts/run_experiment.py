@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agents.ollama_agent import (  # noqa: E402
+    DEFAULT_AGENT_TIMEOUT_S,
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_MODEL,
     AgentExecutionError,
@@ -93,6 +94,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--model", default=DEFAULT_OLLAMA_MODEL, help="Ollama model name.")
     parser.add_argument("--base-url", default=DEFAULT_OLLAMA_BASE_URL, help="Ollama base URL.")
+    parser.add_argument(
+        "--agent-timeout",
+        type=float,
+        default=DEFAULT_AGENT_TIMEOUT_S,
+        help="Per-request Ollama read timeout in seconds.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Base random seed.")
     parser.add_argument("--grid-size", type=int, default=5, help="Grid size.")
     parser.add_argument("--max-steps", type=int, default=10, help="Maximum act-phase steps.")
@@ -149,6 +156,7 @@ def build_manifest(args: argparse.Namespace, paths: RunPaths) -> dict[str, Any]:
     return {
         "run_id": args.run_id,
         "model": args.model,
+        "agent_timeout_s": float(args.agent_timeout),
         "conditions": list(args.conditions),
         "episodes_per_condition": int(args.episodes),
         "base_seed": int(args.seed),
@@ -376,6 +384,7 @@ def initialize_condition_agents(args: argparse.Namespace, condition: str) -> dic
             model=args.model,
             system_prompt_path=prompt_map[agent_name],
             base_url=args.base_url,
+            timeout_s=float(args.agent_timeout),
         )
         for agent_name in AGENT_NAMES
     }

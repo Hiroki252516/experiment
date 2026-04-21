@@ -106,6 +106,13 @@ def render_launch_panel(manifests: list[dict[str, Any]]) -> None:
                 default=["comm", "silent", "random"],
             )
             base_url = st.text_input("Base URL", value="http://localhost:11434")
+            agent_timeout = st.number_input(
+                "Agent timeout (s)",
+                min_value=10.0,
+                max_value=600.0,
+                value=120.0,
+                step=10.0,
+            )
             seed = st.number_input("Seed", min_value=0, value=42)
             submitted = st.form_submit_button("Run experiment", disabled=process_is_running or not conditions)
         if submitted:
@@ -117,6 +124,7 @@ def render_launch_panel(manifests: list[dict[str, Any]]) -> None:
                     episodes=int(episodes),
                     conditions=list(conditions),
                     base_url=base_url,
+                    agent_timeout=float(agent_timeout),
                     seed=int(seed),
                     run_id=run_id,
                 )

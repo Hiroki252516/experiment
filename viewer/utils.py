@@ -63,6 +63,7 @@ def start_experiment_process(
     episodes: int,
     conditions: list[str],
     base_url: str,
+    agent_timeout: float,
     seed: int,
     run_id: str,
 ) -> tuple[subprocess.Popen[Any], Path]:
@@ -77,6 +78,8 @@ def start_experiment_process(
         model,
         "--base-url",
         base_url,
+        "--agent-timeout",
+        str(agent_timeout),
         "--seed",
         str(seed),
         "--run-id",

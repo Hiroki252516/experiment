@@ -83,6 +83,7 @@ def test_manifest_has_required_keys() -> None:
     required_keys = {
         "run_id",
         "model",
+        "agent_timeout_s",
         "conditions",
         "episodes_per_condition",
         "base_seed",
@@ -106,3 +107,8 @@ def test_manifest_has_required_keys() -> None:
         "last_error_message",
     }
     assert required_keys.issubset(manifest.keys())
+
+
+def test_parse_args_accepts_agent_timeout() -> None:
+    args = parse_args(["--agent-timeout", "180"])
+    assert args.agent_timeout == 180.0
